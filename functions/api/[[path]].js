@@ -473,19 +473,20 @@ function textFromGemini(d) {
   const parts = d.candidates && d.candidates[0] && d.candidates[0].content && d.candidates[0].content.parts;
   return Array.isArray(parts) ? parts.map(p => p.text || '').join('') : '';
 }
-async function askGemini(env, model, prompt) {
+async function askGemini(env, model, prompt, timeoutMs = 50000) {
   const headers = { 'content-type': 'application/json', 'x-goog-api-key': String(env.GEMINI_API_KEY).trim() };
   const base = 'https://generativelanguage.googleapis.com/v1beta';
   const attempts = [
-    () => fetch(`${base}/interactions`, { method: 'POST', headers: { ...headers, 'Api-Revision': '2026-05-20' }, body: JSON.stringify({ model, input: prompt }) }),
-    () => fetch(`${base}/models/${encodeURIComponent(model)}:generateContent`, { method: 'POST', headers, body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { temperature: 0.8 } }) }),
+    () => fetch(`${base}/interactions`, { method: 'POST', headers: { ...headers, 'Api-Revision': '2026-05-20' }, body: JSON.stringify({ model, input: prompt }), signal: AbortSignal.timeout(timeoutMs) }),
+    () => fetch(`${base}/models/${encodeURIComponent(model)}:generateContent`, { method: 'POST', headers, body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { temperature: 0.8 } }), signal: AbortSignal.timeout(timeoutMs) }),
   ];
   let lastStatus = 0, reached = false;
   const notes = [];
   for (const [i, go] of attempts.entries()) {
     const label = i === 0 ? 'interactions' : 'generateContent';
     let r;
-    try { r = await go(); reached = true; } catch (e) { notes.push(`${label}: 연결 실패`); continue; }
+    try { r = await go(); reached = true; }
+    catch (e) { notes.push(`${label}: ${e && (e.name === 'TimeoutError' || e.name === 'AbortError') ? Math.round(timeoutMs / 1000) + '초 동안 응답 없음' : '연결 실패'}`); continue; }
     if (r.status === 429) return { error: fail(429, 'ai_quota', '오늘 무료 추천 한도가 모두 사용되었습니다. 내일 다시 이용해 주세요.') };
     const raw = await r.text().catch(() => '');
     let body = null; try { body = JSON.parse(raw); } catch { /* not json */ }
@@ -551,7 +552,7 @@ async function health(env, req) {
     tmdb: !!env.TMDB_API_KEY,
     model: env.GEMINI_MODEL || 'gemini-3.8-flash (default)',
     ai_test: (req && new URL(req.url).searchParams.get('ai') === '1' && env.GEMINI_API_KEY)
-      ? await (async () => { const r = await askGemini(env, env.GEMINI_MODEL || 'gemini-3.8-flash', 'Reply with the single word: ok'); return r.text ? { ok: true, reply: r.text.slice(0, 40), notes: r.notes } : { ok: false, notes: r.notes }; })()
+      ? await (async () => { const r = await askGemini(env, env.GEMINI_MODEL || 'gemini-3.8-flash', 'Reply with the single word: ok', 15000); return r.text ? { ok: true, reply: r.text.slice(0, 40), notes: r.notes } : { ok: false, notes: r.notes }; })()
       : '주소 끝에 ?ai=1 을 붙이면 Gemini 연결을 실제로 시험합니다',
   });
 }
