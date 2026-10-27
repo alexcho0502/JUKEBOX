@@ -1,0 +1,19 @@
+# (선택) 명령줄 도구(wrangler)로 배포할 때만 이 파일 이름을 wrangler.toml 로 바꿔 쓰세요.
+# 대시보드로 배포한다면 이 파일은 그대로 두면 됩니다. 이름이 wrangler.toml 이면 대시보드 설정이 잠깁니다.
+
+name = "jukebox"
+compatibility_date = "2025-09-01"
+pages_build_output_dir = "public"
+
+# Cloudflare 대시보드에서 만든 D1 데이터베이스를 연결합니다.
+# database_id 는 D1 화면에서 복사해 바꿔 넣으세요 (대시보드에서 바인딩을 설정했다면 이 블록은 없어도 됩니다).
+[[d1_databases]]
+binding = "DB"
+database_name = "jukebox"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+[vars]
+# 무료 등급에서 쓸 Gemini 모델. Google AI Studio 의 모델 목록에서 바꿀 수 있습니다.
+GEMINI_MODEL = "gemini-3.8-flash"
+# 한 사람(IP)이 하루에 받을 수 있는 추천 횟수
+REC_DAILY_LIMIT = "20"
