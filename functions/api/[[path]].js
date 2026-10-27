@@ -463,6 +463,42 @@ function cleanRecs(mode, out) {
   return res;
 }
 
+// Gemini call. New AI Studio keys ("AQ." auth keys) are documented with the Interactions endpoint,
+// older "AIza" keys work with generateContent — try one, then the other.
+function textFromGemini(d) {
+  if (!d || typeof d !== 'object') return '';
+  if (typeof d.output_text === 'string') return d.output_text;
+  if (Array.isArray(d.steps)) return d.steps.filter(s => !s.type || s.type === 'model_output').flatMap(s => Array.isArray(s.content) ? s.content : []).map(c => (c && typeof c.text === 'string' ? c.text : '')).join('');
+  if (Array.isArray(d.outputs)) return d.outputs.map(o => (o && typeof o.text === 'string' ? o.text : '')).join('');
+  const parts = d.candidates && d.candidates[0] && d.candidates[0].content && d.candidates[0].content.parts;
+  return Array.isArray(parts) ? parts.map(p => p.text || '').join('') : '';
+}
+async function askGemini(env, model, prompt) {
+  const headers = { 'content-type': 'application/json', 'x-goog-api-key': String(env.GEMINI_API_KEY).trim() };
+  const base = 'https://generativelanguage.googleapis.com/v1beta';
+  const attempts = [
+    () => fetch(`${base}/interactions`, { method: 'POST', headers: { ...headers, 'Api-Revision': '2026-05-20' }, body: JSON.stringify({ model, input: prompt }) }),
+    () => fetch(`${base}/models/${encodeURIComponent(model)}:generateContent`, { method: 'POST', headers, body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { temperature: 0.8 } }) }),
+  ];
+  let lastStatus = 0, reached = false;
+  for (const go of attempts) {
+    let r;
+    try { r = await go(); reached = true; } catch { continue; }
+    if (r.status === 429) return { error: fail(429, 'ai_quota', '오늘 무료 추천 한도가 모두 사용되었습니다. 내일 다시 이용해 주세요.') };
+    if (r.ok) {
+      const text = textFromGemini(await r.json().catch(() => null));
+      if (text) return { text };
+      lastStatus = 502;
+      continue;
+    }
+    lastStatus = r.status;
+  }
+  if (!reached) return { error: fail(502, 'ai_unreachable', '추천 엔진에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.') };
+  if (lastStatus === 401 || lastStatus === 403) return { error: fail(502, 'ai_auth', 'Gemini API 키가 거부되었습니다. Cloudflare 설정의 GEMINI_API_KEY 값을 확인해 주세요.') };
+  if (lastStatus === 404) return { error: fail(502, 'ai_model', `Gemini 모델(${model})을 찾지 못했습니다. GEMINI_MODEL 값을 AI Studio의 모델 이름으로 바꿔 주세요.`) };
+  return { error: fail(502, 'ai_error', '추천 엔진이 응답하지 않았습니다. 잠시 후 다시 시도해 주세요.') };
+}
+
 async function recommend(req, env) {
   if (!env.GEMINI_API_KEY) return fail(500, 'config', '서버 설정(GEMINI_API_KEY)이 비어 있습니다.');
   const body = await readJson(req);
@@ -477,25 +513,36 @@ async function recommend(req, env) {
 
   const prompt = buildPrompt(mode, items, (body && body.opts) || {}, body && body.more);
   const model = env.GEMINI_MODEL || 'gemini-3.8-flash';
-  let r;
-  try {
-    r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
-      body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { temperature: 0.8 } }),
-    });
-  } catch {
-    return fail(502, 'ai_unreachable', '추천 엔진에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.');
-  }
-  if (r.status === 429) return fail(429, 'ai_quota', '오늘 무료 추천 한도가 모두 사용되었습니다. 내일 다시 이용해 주세요.');
-  if (!r.ok) return fail(502, 'ai_error', '추천 엔진이 응답하지 않았습니다. 잠시 후 다시 시도해 주세요.');
-  const data = await r.json().catch(() => null);
-  const text = (data && data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts || []).map(p => p.text || '').join('');
+  const ai = await askGemini(env, model, prompt);
+  if (ai.error) return ai.error;
+  const text = ai.text;
   const out = parseModelJson(text);
   if (!out) return fail(502, 'ai_format', '추천 결과를 읽지 못했습니다. 다시 시도해 주세요.');
   const res = cleanRecs(mode, out);
   if (!res.recs.length) return fail(502, 'ai_empty', '추천 결과가 비어 있습니다. 목록이나 설정을 바꿔 다시 시도해 주세요.');
   return json(res);
+}
+
+// setup check — open /api/health in a browser. Reports only yes/no, never secret values.
+async function health(env) {
+  let db = 'missing';
+  if (env.DB) {
+    try {
+      const { results } = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all();
+      const names = results.map(r => r.name);
+      const need = ['users', 'sessions', 'items', 'messages', 'usage'];
+      const lack = need.filter(n => !names.includes(n));
+      db = lack.length ? 'tables_missing: ' + lack.join(', ') : 'ok';
+    } catch (e) { db = 'error: ' + String(e && e.message || e).slice(0, 120); }
+  }
+  return json({
+    db,
+    gemini_key: !!env.GEMINI_API_KEY,
+    gemini_key_format: env.GEMINI_API_KEY ? (env.GEMINI_API_KEY.trim() !== env.GEMINI_API_KEY ? 'has_spaces' : (/^AQ\./.test(env.GEMINI_API_KEY) ? 'AQ' : (/^AIza/.test(env.GEMINI_API_KEY) ? 'AIza' : 'unknown'))) : null,
+    pin_pepper: !!env.PIN_PEPPER,
+    tmdb: !!env.TMDB_API_KEY,
+    model: env.GEMINI_MODEL || 'gemini-3.8-flash (default)',
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -506,7 +553,8 @@ export async function onRequest(context) {
   const parts = [].concat(params.path || []).map(decodeURIComponent);
   const route = parts.join('/');
   const m = req.method;
-  if (!env.DB && route !== 'recommend' && !route.startsWith('tmdb')) return fail(500, 'config', '데이터베이스(DB) 연결이 설정되지 않았습니다.');
+  if (route === 'health' && m === 'GET') return await health(env);
+  if (!env.DB && !route.startsWith('tmdb')) return fail(500, 'config', '데이터베이스(DB) 연결이 설정되지 않았습니다. Cloudflare Pages 설정의 Bindings에서 D1을 변수 이름 DB로 연결한 뒤 다시 배포해 주세요.');
   try {
     if (route === 'login' && m === 'POST') return await login(req, env);
     if (route === 'logout' && m === 'POST') return await logout(req, env);
@@ -527,6 +575,8 @@ export async function onRequest(context) {
     if (parts[0] === 'messages' && parts[1] && m === 'DELETE') return await deleteMessage(env, me, int(parts[1], 1, 1e12, 0));
     return fail(404, 'not_found', '없는 주소입니다.');
   } catch (e) {
-    return fail(500, 'server_error', '서버에서 문제가 생겼습니다. 잠시 후 다시 시도해 주세요.');
+    const msg = String(e && e.message || e);
+    if (/no such table/i.test(msg)) return fail(500, 'no_tables', '데이터베이스 표가 아직 만들어지지 않았습니다. Cloudflare D1의 Console에서 schema.sql 내용을 실행해 주세요.');
+    return fail(500, 'server_error', '서버에서 문제가 생겼습니다. 잠시 후 다시 시도해 주세요. (' + msg.slice(0, 120) + ')');
   }
 }
