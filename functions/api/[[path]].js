@@ -481,22 +481,30 @@ async function askGemini(env, model, prompt) {
     () => fetch(`${base}/models/${encodeURIComponent(model)}:generateContent`, { method: 'POST', headers, body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { temperature: 0.8 } }) }),
   ];
   let lastStatus = 0, reached = false;
-  for (const go of attempts) {
+  const notes = [];
+  for (const [i, go] of attempts.entries()) {
+    const label = i === 0 ? 'interactions' : 'generateContent';
     let r;
-    try { r = await go(); reached = true; } catch { continue; }
+    try { r = await go(); reached = true; } catch (e) { notes.push(`${label}: 연결 실패`); continue; }
     if (r.status === 429) return { error: fail(429, 'ai_quota', '오늘 무료 추천 한도가 모두 사용되었습니다. 내일 다시 이용해 주세요.') };
+    const raw = await r.text().catch(() => '');
+    let body = null; try { body = JSON.parse(raw); } catch { /* not json */ }
     if (r.ok) {
-      const text = textFromGemini(await r.json().catch(() => null));
-      if (text) return { text };
+      const text = textFromGemini(body);
+      if (text) return { text, notes };
+      notes.push(`${label}: 200, 본문에서 글을 찾지 못함 (${raw.slice(0, 160)})`);
       lastStatus = 502;
       continue;
     }
+    const gmsg = body && body.error && (body.error.message || body.error.status) || raw.slice(0, 160);
+    notes.push(`${label}: ${r.status} ${String(gmsg).slice(0, 200)}`);
     lastStatus = r.status;
   }
-  if (!reached) return { error: fail(502, 'ai_unreachable', '추천 엔진에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.') };
-  if (lastStatus === 401 || lastStatus === 403) return { error: fail(502, 'ai_auth', 'Gemini API 키가 거부되었습니다. Cloudflare 설정의 GEMINI_API_KEY 값을 확인해 주세요.') };
-  if (lastStatus === 404) return { error: fail(502, 'ai_model', `Gemini 모델(${model})을 찾지 못했습니다. GEMINI_MODEL 값을 AI Studio의 모델 이름으로 바꿔 주세요.`) };
-  return { error: fail(502, 'ai_error', '추천 엔진이 응답하지 않았습니다. 잠시 후 다시 시도해 주세요.') };
+  const detail = notes.length ? ' [' + notes.join(' | ') + ']' : '';
+  if (!reached) return { error: fail(502, 'ai_unreachable', '추천 엔진에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.' + detail), notes };
+  if (lastStatus === 401 || lastStatus === 403) return { error: fail(502, 'ai_auth', 'Gemini API 키가 거부되었습니다. Cloudflare 설정의 GEMINI_API_KEY 값을 확인해 주세요.' + detail), notes };
+  if (lastStatus === 404) return { error: fail(502, 'ai_model', `Gemini 모델(${model})을 찾지 못했습니다. GEMINI_MODEL 값을 AI Studio의 모델 이름으로 바꿔 주세요.` + detail), notes };
+  return { error: fail(502, 'ai_error', '추천 엔진이 응답하지 않았습니다.' + detail), notes };
 }
 
 async function recommend(req, env) {
@@ -524,7 +532,7 @@ async function recommend(req, env) {
 }
 
 // setup check — open /api/health in a browser. Reports only yes/no, never secret values.
-async function health(env) {
+async function health(env, req) {
   let db = 'missing';
   if (env.DB) {
     try {
@@ -542,6 +550,9 @@ async function health(env) {
     pin_pepper: !!env.PIN_PEPPER,
     tmdb: !!env.TMDB_API_KEY,
     model: env.GEMINI_MODEL || 'gemini-3.8-flash (default)',
+    ai_test: (req && new URL(req.url).searchParams.get('ai') === '1' && env.GEMINI_API_KEY)
+      ? await (async () => { const r = await askGemini(env, env.GEMINI_MODEL || 'gemini-3.8-flash', 'Reply with the single word: ok'); return r.text ? { ok: true, reply: r.text.slice(0, 40), notes: r.notes } : { ok: false, notes: r.notes }; })()
+      : '주소 끝에 ?ai=1 을 붙이면 Gemini 연결을 실제로 시험합니다',
   });
 }
 
@@ -553,7 +564,7 @@ export async function onRequest(context) {
   const parts = [].concat(params.path || []).map(decodeURIComponent);
   const route = parts.join('/');
   const m = req.method;
-  if (route === 'health' && m === 'GET') return await health(env);
+  if (route === 'health' && m === 'GET') return await health(env, req);
   if (!env.DB && !route.startsWith('tmdb')) return fail(500, 'config', '데이터베이스(DB) 연결이 설정되지 않았습니다. Cloudflare Pages 설정의 Bindings에서 D1을 변수 이름 DB로 연결한 뒤 다시 배포해 주세요.');
   try {
     if (route === 'login' && m === 'POST') return await login(req, env);
