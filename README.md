@@ -1,0 +1,98 @@
+# JUKEBOX v2 — 웹사이트 배포 안내
+
+좋아하는 앨범과 곡을 5개 이상 담으면 취향을 분석해 영수증 모양으로 추천해 주는 사이트입니다.
+Claude에서 확인한 영수증 디자인과 기능을 그대로 옮겼고, 비용은 들지 않습니다.
+
+## 무엇으로 돌아가나요
+
+| 역할 | 서비스 | 비용 |
+|---|---|---|
+| 사이트 + 서버 기능 | Cloudflare Pages (+ Functions) | 무료 |
+| 회원·목록·소식·오늘의 추천·방명록 | Cloudflare D1 | 무료 |
+| 추천 문장 | Google Gemini API 무료 등급 | 무료 (결제 정보를 연결하지 않으면 청구되지 않음) |
+| 앨범 검색·커버·실제 수록곡 확인 | Apple iTunes Search API | 무료, 키 불필요 |
+| 발매 연도·장르·국가, 수록곡 보조 확인 | MusicBrainz / Cover Art Archive | 무료, 키 불필요 |
+
+---
+
+## 1. GitHub 저장소의 파일 바꾸기
+
+기존 `jukebox` 저장소를 그대로 씁니다.
+
+1. 저장소 화면에서 **Add file → Upload files**를 누릅니다.
+2. 압축을 푼 폴더 **안의 내용물 전부**(`public`, `functions`, `schema.sql`, `README.md`)를 끌어다 놓고 **Commit changes**를 누릅니다. 같은 이름의 파일은 새 파일로 바뀝니다.
+3. 올린 뒤 저장소에서 `functions/api/[[path]].js`가 이 경로와 이름 그대로 있는지 확인합니다.
+4. (선택) 더 이상 쓰지 않는 `public/bg-old.jpg`, `public/bg-young.jpg`, `wrangler.toml.example`은 지워도 됩니다.
+
+## 2. 데이터베이스 새로 만들기 (기존 데이터 삭제)
+
+1. Cloudflare 대시보드 → **Storage & Databases → D1 SQL Database → jukebox → Console**.
+2. `schema.sql` 내용을 **전부** 복사해 붙여넣고 **Execute**를 누릅니다.
+   - 이전 버전의 회원·목록·방명록이 **모두 지워지고** 새 표가 만들어집니다.
+
+## 3. 설정값 확인 (Pages 프로젝트 → Settings)
+
+**Bindings**: D1 `DB` 연결은 그대로 둡니다.
+
+**Variables and Secrets**
+
+| 이름 | 종류 | 값 |
+|---|---|---|
+| `GEMINI_API_KEY` | Secret | 지금 쓰는 키 그대로 |
+| `PIN_PEPPER` | Secret | 지금 값 그대로 |
+| `ADMIN_USERS` | **Text, 새로 추가** | 관리자로 쓸 Username. 여러 명이면 쉼표로: `myname,friend` |
+| `GEMINI_MODEL` | Text (선택) | 기본값 `gemini-3.8-flash` |
+| `REC_DAILY_LIMIT` | Text (선택) | 한 사람(IP)이 하루에 받을 수 있는 추천 횟수, 기본값 `20` |
+
+`TMDB_API_KEY`는 영화 탭이 없어져 더 이상 쓰지 않으니 지워도 됩니다.
+
+설정을 바꾼 뒤에는 **Deployments → 가장 최근 배포 → … → Retry deployment**를 한 번 눌러야 적용됩니다.
+GitHub에 파일을 올리면 새 배포는 자동으로 시작됩니다.
+
+## 4. 작동 확인
+
+1. `https://(내 사이트).pages.dev/api/health` 를 엽니다.
+   - `"version":2`, `"db":"ok"`, `"gemini_key":true`, `"pin_pepper":true`, `"admins":1` 이면 준비 완료입니다.
+   - `"db":"tables_missing…"` 이면 2단계를 다시 실행하세요.
+2. 같은 주소 끝에 `?ai=1` 을 붙여 엽니다.
+   - `"ai_test":{"ok":true,…}` 이면 추천 엔진이 연결된 것입니다.
+   - `ok:false` 이면 `notes`에 이유가 나옵니다 (키 거부, 모델 이름 오류, 한도 초과 등).
+3. 사이트에서 `ADMIN_USERS`에 적은 Username으로 Join하면 이름 옆에 `*ADMIN*`이 붙습니다.
+
+## 관리자가 할 수 있는 것
+
+- Community 아래쪽 **ADMIN** 칸: 유저 삭제(계정·목록·소식·오늘의 추천·방명록 전부), 잠긴 계정 풀기
+- 피드의 아무 소식이나 **관리자 삭제**
+- 관리자 지정은 사이트 안에서 바꿀 수 없고 `ADMIN_USERS` 설정으로만 바꿉니다.
+
+## 보안과 규칙
+
+- 남의 소식·방명록 삭제, 관리자 기능 같은 규칙은 모두 서버에서 검사합니다.
+- Username + 숫자 4자리 코드로 입장합니다. 같은 Username으로 5번 틀리면 15분 잠김, 한 IP에서 1시간에 30번 넘게 시도하면 차단됩니다.
+- 코드는 원문이 아니라 `PIN_PEPPER`와 섞은 해시로만 저장합니다.
+
+## 추천 정확도
+
+추천이 끝나면 서버가 앨범마다 Apple Music(없으면 MusicBrainz)에서 **실제 트랙리스트**를 받아,
+"먼저 들어볼 곡"이 그 앨범에 정말 있는지 확인합니다. 없으면 실제 트랙리스트 안에서 다시 고르고,
+곡 추천의 "수록 앨범"도 실제 카탈로그와 대조해 바로잡습니다. 커버도 이때 실제 이미지로 붙습니다.
+
+## 글꼴 라이선스 — 꼭 읽어 주세요
+
+- **Galmuri**(한글): SIL Open Font License. 상업적 사용 포함 자유롭게 쓸 수 있습니다 (`public/fonts/GALMURI-OFL.txt`).
+- **Merchant Copy**(영문·숫자): 제작자가 **개인적·비상업적 사용만 무료**로 허락한 글꼴입니다.
+  광고·유료 기능 등 수익이 생기면 제작사(Cumberland Fontworks, fontworks@cumberlandgames.com)에 문의하거나 다른 글꼴로 바꿔야 합니다.
+  바꾸려면 `public/fonts.css`의 Merchant Copy 두 줄을 지우면 영문도 Galmuri로 표시됩니다.
+
+## 이용 조건
+
+- Apple 앨범 아트는 작품 소개 용도로만 쓰고, 근처에 Apple Music 링크가 있어야 합니다. 추천 항목마다 링크가 붙어 있습니다.
+- Gemini 무료 등급에서는 입력한 목록이 Google 서비스 개선에 쓰일 수 있습니다 (사이트 하단에 안내되어 있습니다).
+
+## 폴더 구조
+
+```
+public/            화면 (index.html, style.css, fonts.css, app.js, paper.js, fonts/)
+functions/api/     서버 기능 — /api/* 주소로 동작
+schema.sql         데이터베이스 표 만들기 (실행하면 기존 데이터가 지워집니다)
+```
