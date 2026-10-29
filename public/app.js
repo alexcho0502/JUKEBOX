@@ -488,23 +488,55 @@
     const before = state.results.recs.length;
     if (more) renderResults(); else { $('#music-results').innerHTML = '<div class="status" id="music-status"></div>'; }
     $('#music-results').scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
-    setStatus('목록을 분석하고, 추천한 앨범의 실제 수록곡까지 확인하고 있습니다. 보통 30초~1분이 걸립니다.', true);
+    setStatus('목록을 분석하고 있습니다. 첫 추천은 보통 10~20초 뒤에 찍힙니다.', true);
     const ctl = runCtl = new AbortController();
-    let res = null, failed = null;
-    try { res = await api('recommend', { method: 'POST', body: payload(more), signal: ctl.signal }); }
-    catch (e) { failed = e; }
-    if (res) {
-      if (!more && res.profile) state.results.profile = res.profile;
-      const seen = new Set(state.results.recs.map(recKey));
-      arr(res.recs).forEach(r => { if (!seen.has(recKey(r))) { seen.add(recKey(r)); state.results.recs.push(r); } });
-    }
+    const idx = new Map(); let got = 0, failed = null, done = null;
+    const ensureSec = () => {
+      if ($('#music-recs')) return;
+      const sec = document.createElement('section');
+      sec.innerHTML = `<div class="sec-head"><h3>RECOMMENDED</h3></div><div class="cols"><span>NO ITEM</span><span>MATCH SCORE / 100</span></div><div class="cards" id="music-recs"></div>`;
+      $('#music-results').append(sec);
+    };
+    const onEvent = ev => {
+      if (ev.t === 'profile' && !more) {
+        state.results.profile = ev.profile;
+        $('#music-results .profile')?.remove();
+        $('#music-status').after(profileBlock(ev.profile));
+      } else if (ev.t === 'rec') {
+        const r = ev.rec, k = recKey(r);
+        if (state.results.recs.some(x => recKey(x) === k)) return;
+        const at = state.results.recs.push(r) - 1; idx.set(ev.i, at); got++;
+        ensureSec(); $('#music-recs').append(recCard(r, at, { fresh: true }));
+        setStatus(`${got}개가 도착했습니다 · 실제 수록곡과 커버를 확인하고 있습니다`, true); save();
+      } else if (ev.t === 'fix') {
+        const at = idx.get(ev.i), r = state.results.recs[at]; if (!r) return;
+        Object.assign(r, ev.patch);
+        const old = $('#music-recs') && $('#music-recs').children[at]; if (old) old.replaceWith(recCard(r, at));
+        save();
+      } else if (ev.t === 'done') done = ev;
+      else if (ev.t === 'error') failed = ev;
+    };
+    try {
+      const headers = { 'content-type': 'application/json', accept: 'application/x-ndjson' };
+      if (auth && auth.token) headers.authorization = 'Bearer ' + auth.token;
+      const r = await fetch('/api/recommend', { method: 'POST', headers, body: JSON.stringify(payload(more)), signal: ctl.signal });
+      if (!r.ok) { let d = null; try { d = await r.json(); } catch (e) { /* not json */ } failed = (d && d.error) || { message: `서버 오류 (${r.status})` }; }
+      else {
+        const reader = r.body.getReader(), dec = new TextDecoder(); let buf = '';
+        for (;;) {
+          const { value, done: end } = await reader.read(); if (end) break;
+          buf += dec.decode(value, { stream: true });
+          let k; while ((k = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, k).trim(); buf = buf.slice(k + 1); if (line) { try { onEvent(JSON.parse(line)); } catch (e) { /* skip */ } } }
+        }
+        if (buf.trim()) { try { onEvent(JSON.parse(buf)); } catch (e) { /* skip */ } }
+      }
+    } catch (e) { failed = e && e.name === 'AbortError' ? { code: 'cancelled' } : { message: '서버와 연결이 끊겼습니다. 다시 시도해 주세요.' }; }
     setBusy(false); save(); renderResults();
-    const got = state.results.recs.length - before;
-    if (failed && failed.code === 'cancelled') setStatus('멈췄습니다.', false);
-    else if (failed) setStatus(sErr(failed), false);
+    if (failed && failed.code === 'cancelled') setStatus(got ? `멈췄습니다. ${got}개까지 받았습니다.` : '멈췄습니다.', false);
+    else if (failed && !got) setStatus(failed.message || '추천을 받지 못했습니다. 다시 시도해 주세요.', false);
     else if (!got) setStatus('새로운 추천을 받지 못했습니다. 설정을 바꿔 다시 시도해 주세요.', false);
     else {
-      setStatus((res.fixed > 0 ? `수록곡 확인에서 ${res.fixed}건을 바로잡았습니다. ` : '') + `${got}개를 추천했습니다. “취향 맞음”을 누르면 다음 추천에 반영되고${auth ? ' Community에도 공유됩니다.' : ', 로그인하면 Community에 공유됩니다.'}`, false);
+      setStatus((done && done.fixed > 0 ? `수록곡 확인에서 ${done.fixed}건을 바로잡았습니다. ` : '') + `${got}개를 추천했습니다. “취향 맞음”을 누르면 다음 추천에 반영되고${auth ? ' Community에도 공유됩니다.' : ', 로그인하면 Community에 공유됩니다.'}`, false);
       if (auth && $('#music-share').checked) postAnalysis(state.results.recs.slice(before), more ? null : state.results.profile);
     }
   }

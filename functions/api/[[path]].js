@@ -356,7 +356,6 @@ ${lines}
 - why: 존댓말 2문장, 합쳐서 110자 이내. 사용자 목록의 작품을 하나 이상 짚고 소리·분위기의 공통점을 구체적으로. 뻔한 칭찬 금지.
 - axis: 가장 강한 연결 축 하나. detail은 25자 이내 근거.
 - genre: RYM 영어 장르명 1~2개, 쉼표로. country: 아티스트 출신 국가(한국어).
-- colors: 실제 커버 아트의 대표 색 3개(#RRGGBB). style: mesh | minimal | type.
 - match: 취향 적합도(50~99 정수). 높은 순으로.
 
 [출력 형식]
@@ -365,95 +364,114 @@ ${more ? '' : `첫 줄은 취향 프로필:
 {"kind":"profile","summary":"존댓말 2문장, 합쳐서 120자 이내로 취향의 핵심 해석","genres":[{"name":"Trip Hop","weight":85}],"keywords":["몽환적","야행성","빈티지","멜랑콜리"]}
 (genres 상위 5개, keywords 한국어 4개)
 그다음 줄부터 `}추천 하나당 한 줄:
-{"kind":"rec","type":"album 또는 track","title":"...","artist":"...","year":"1998","album":"곡이면 수록 앨범","genre":"...","country":"...","axis":{"axis":"프로듀서","detail":"..."},"why":"...습니다. ...입니다.","start_with":"앨범이면 먼저 들어볼 곡","colors":["#..","#..","#.."],"style":"mesh","match":88}`;
+{"kind":"rec","type":"album 또는 track","title":"...","artist":"...","year":"1998","album":"곡이면 수록 앨범","genre":"...","country":"...","axis":{"axis":"프로듀서","detail":"..."},"why":"...습니다. ...입니다.","start_with":"앨범이면 먼저 들어볼 곡","match":88}`;
 }
 
-function textFromGemini(d) {
-  if (!d || typeof d !== 'object') return '';
-  if (typeof d.output_text === 'string') return d.output_text;
-  if (Array.isArray(d.steps)) return d.steps.filter(s => !s.type || s.type === 'model_output').flatMap(s => arr(s.content)).map(c => (c && typeof c.text === 'string' ? c.text : '')).join('');
-  if (Array.isArray(d.outputs)) return d.outputs.map(o => (o && typeof o.text === 'string' ? o.text : '')).join('');
-  const parts = d.candidates && d.candidates[0] && d.candidates[0].content && d.candidates[0].content.parts;
-  return Array.isArray(parts) ? parts.map(p => p.text || '').join('') : '';
-}
-// New AI Studio keys ("AQ.") use the Interactions endpoint; older "AIza" keys use generateContent — try one, then the other.
-async function askGemini(env, prompt, timeoutMs = 55000) {
-  const model = env.GEMINI_MODEL || 'gemini-3.8-flash';
-  const headers = { 'content-type': 'application/json', 'x-goog-api-key': String(env.GEMINI_API_KEY || '').trim() };
-  const base = 'https://generativelanguage.googleapis.com/v1beta';
-  const attempts = [
-    ['interactions', () => fetch(`${base}/interactions`, { method: 'POST', headers: { ...headers, 'Api-Revision': '2026-05-20' }, body: JSON.stringify({ model, input: prompt }), signal: AbortSignal.timeout(timeoutMs) })],
-    ['generateContent', () => fetch(`${base}/models/${encodeURIComponent(model)}:generateContent`, { method: 'POST', headers, body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { temperature: 0.8 } }), signal: AbortSignal.timeout(timeoutMs) })],
-  ];
-  const notes = []; let last = 0, reached = false;
-  for (const [label, go] of attempts) {
-    let r;
-    try { r = await go(); reached = true; } catch (e) { notes.push(`${label}: ${e && /Timeout|Abort/.test(e.name) ? '응답 없음' : '연결 실패'}`); continue; }
-    if (r.status === 429) return { error: fail(429, 'ai_quota', '오늘 무료 추천 한도가 모두 사용되었습니다. 내일 다시 이용해 주세요.') };
-    const raw = await r.text().catch(() => ''); const body = parse(raw);
-    if (r.ok) { const text = textFromGemini(body); if (text) return { text, notes }; notes.push(`${label}: 빈 응답`); last = 502; continue; }
-    notes.push(`${label}: ${r.status} ${String(body && body.error && (body.error.message || body.error.status) || raw).slice(0, 160)}`); last = r.status;
-  }
-  const detail = notes.length ? ' [' + notes.join(' | ') + ']' : '';
-  if (!reached) return { error: fail(502, 'ai_unreachable', '추천 엔진에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.' + detail), notes };
-  if (last === 401 || last === 403) return { error: fail(502, 'ai_auth', 'Gemini API 키가 거부되었습니다. GEMINI_API_KEY 값을 확인해 주세요.' + detail), notes };
-  if (last === 404) return { error: fail(502, 'ai_model', `Gemini 모델(${model})을 찾지 못했습니다. GEMINI_MODEL 값을 확인해 주세요.` + detail), notes };
-  return { error: fail(502, 'ai_error', '추천 엔진이 응답하지 않았습니다.' + detail), notes };
-}
-function parseLines(text) {
-  let profile = null; const recs = [], seen = new Set();
-  const body = String(text || '').replace(/```(?:json)?/g, '');
-  const chunks = body.split('\n').map(l => l.trim().replace(/,$/, '')).filter(l => l.startsWith('{'));
-  for (const line of chunks) {
-    const o = parse(line); if (!o || typeof o !== 'object') continue;
-    if (o.kind === 'profile') { profile = cleanProfile(o); continue; }
-    if (o.kind !== 'rec') continue;
-    const r = cleanItem(o); if (!r) continue;
-    const k = (r.artist + '|' + r.title).toLowerCase(); if (seen.has(k)) continue; seen.add(k);
-    r.axis = o.axis && typeof o.axis === 'object' ? { axis: clip(o.axis.axis, 20), detail: clip(o.axis.detail, 60) } : null;
-    r.start_with = r.type === 'track' ? '' : clip(o.start_with, 120);
-    recs.push(r);
-  }
-  return { profile, recs };
-}
-
-// check every recommendation against a real catalogue: album → its tracklist, song → the album it is on
-async function verify(env, recs) {
-  let fixed = 0, budget = 36; // stay well under the 50 sub-requests a free Pages Function may make
-  const needPick = [];
-  for (const r of recs) {
-    if (budget < 4) break;
-    if (r.type === 'track') {
-      budget -= 1;
-      const s = await findSong(r.artist, r.title);
-      if (s.cover && !r.cover) r.cover = s.cover;
-      if (s.link) r.link = s.link;
-      if (s.albums.length && !s.albums.some(a => same(a, r.album))) { if (r.album !== s.first) { r.album = s.first; fixed++; } }
-      continue;
+// Gemini, streamed. Free models in order: if one is overloaded (503) or out of quota (429), move to the next at once.
+// New AI Studio keys ("AQ.") use the Interactions endpoint, older "AIza" keys use generateContent.
+const modelList = env => [...new Set([env.GEMINI_MODEL || 'gemini-3.8-flash', ...String(env.GEMINI_FALLBACKS ?? 'gemini-3.6-flash,gemini-3.5-flash-lite').split(',').map(s => s.trim()).filter(Boolean)])];
+const thinkingFor = m => (/3\.8-flash$/.test(m) ? 'low' : /3\.6-flash$|^gemini-3-flash/.test(m) ? 'minimal' : '');
+async function* sse(body) {
+  const reader = body.getReader(), dec = new TextDecoder(); let buf = '';
+  for (;;) {
+    const { value, done } = await reader.read(); if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let k;
+    while ((k = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, k).replace(/\r$/, ''); buf = buf.slice(k + 1);
+      if (line.startsWith('data:')) { const d = line.slice(5).trim(); if (d && d !== '[DONE]') yield d; }
     }
-    budget -= 2;
-    const al = await findAlbum(r.artist, r.title);
-    let tracks = [];
-    if (al) { if (al.cover) r.cover = al.cover; if (al.link) r.link = al.link; budget -= 1; tracks = await albumTracks(al); }
-    else { budget -= 2; const mb = await mbTracks(r.artist, r.title); if (mb) { tracks = mb.tracks; if (mb.cover && !r.cover) r.cover = mb.cover; } }
-    if (!tracks.length) continue;
-    if (r.start_with && tracks.some(t => same(t, r.start_with))) { r.start_with = tracks.find(t => same(t, r.start_with)); continue; }
-    needPick.push({ r, tracks: [...new Set(tracks)].slice(0, 30) });
   }
-  if (needPick.length) {
-    const ask = needPick.map((x, i) => `${i}. ${x.r.artist} — ${x.r.title}\n   실제 트랙리스트: ${x.tracks.join(' / ')}`).join('\n');
-    const ai = await askGemini(env, `다음 앨범마다, 처음 듣는 사람에게 먼저 권할 대표곡 하나를 '반드시 주어진 실제 트랙리스트 안에서' 골라라. 트랙리스트에 없는 곡은 절대 쓰지 마라.\n${ask}\nJSON 배열만 출력: [{"i":0,"track":"트랙리스트에 적힌 그대로"}]`, 25000);
-    const out = ai.text ? parse(String(ai.text).replace(/```(?:json)?/g, '').trim().replace(/^[^[]*/, '').replace(/[^\]]*$/, '')) : null;
-    needPick.forEach((x, i) => {
-      const pick = arr(out).find(o => o && +o.i === i);
-      const t = pick && x.tracks.find(tr => same(tr, pick.track));
-      if ((t || '') !== x.r.start_with) fixed++;
-      x.r.start_with = t || '';
-    });
+}
+function deltaText(api, d) {
+  const o = parse(d); if (!o) return '';
+  if (api === 'interactions') return o.delta && o.delta.type === 'text' && typeof o.delta.text === 'string' ? o.delta.text : '';
+  const parts = o.candidates && o.candidates[0] && o.candidates[0].content && o.candidates[0].content.parts;
+  return Array.isArray(parts) ? parts.filter(p => !p.thought).map(p => p.text || '').join('') : '';
+}
+async function geminiStream(env, prompt, onText, { firstByteMs = 25000, totalMs = 100000 } = {}) {
+  const key = String(env.GEMINI_API_KEY || '').trim(), base = 'https://generativelanguage.googleapis.com/v1beta';
+  const notes = []; let quota = 0, tried = 0;
+  for (const model of modelList(env)) {
+    const apis = /^AIza/.test(key) ? ['generateContent', 'interactions'] : ['interactions', 'generateContent'];
+    let think = thinkingFor(model);
+    for (let a = 0; a < apis.length; a++) {
+      const api = apis[a];
+      const url = api === 'interactions' ? `${base}/interactions` : `${base}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
+      const body = api === 'interactions'
+        ? { model, input: prompt, stream: true, ...(think ? { generation_config: { thinking_level: think } } : {}) }
+        : { contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { temperature: 0.8, ...(think ? { thinkingConfig: { thinkingLevel: think } } : {}) } };
+      const ctl = new AbortController(); const t1 = setTimeout(() => ctl.abort(), firstByteMs); tried++;
+      let r;
+      try { r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': key, ...(api === 'interactions' ? { 'Api-Revision': '2026-05-20' } : {}) }, body: JSON.stringify(body), signal: ctl.signal }); }
+      catch (e) { clearTimeout(t1); notes.push(`${model}: 응답 없음`); break; }
+      clearTimeout(t1);
+      if (!r.ok) {
+        const raw = await r.text().catch(() => ''), j = parse(raw), msg = String(j && j.error && (j.error.message || j.error.status) || raw).slice(0, 140);
+        notes.push(`${model} ${api}: ${r.status} ${msg}`);
+        if (r.status === 400 && think) { think = ''; a--; continue; }          // this model rejects the thinking level: retry once without it
+        if (r.status === 429) { quota++; break; }                               // out of quota: next model
+        if ([500, 502, 503, 504].includes(r.status)) break;                     // overloaded: next model
+        if ([401, 403, 404].includes(r.status) && a === 0) continue;            // wrong endpoint for this key: try the other
+        break;
+      }
+      const t2 = setTimeout(() => ctl.abort(), totalMs); let got = 0;
+      try { for await (const d of sse(r.body)) { const txt = deltaText(api, d); if (txt) { got += txt.length; onText(txt); } } }
+      catch (e) { notes.push(`${model}: 응답이 끊김`); }
+      clearTimeout(t2);
+      if (got) return { ok: true, model, notes };
+      notes.push(`${model}: 빈 응답`); break;
+    }
   }
-  return fixed;
+  if (quota && quota === modelList(env).length) return { error: { status: 429, code: 'ai_quota', message: '오늘 무료 추천 한도가 모두 사용되었습니다. 내일 다시 이용해 주세요.' }, notes };
+  if (notes.some(n => / 40[13] /.test(n))) return { error: { status: 502, code: 'ai_auth', message: 'Gemini API 키가 거부되었습니다. GEMINI_API_KEY 값을 확인해 주세요.' }, notes };
+  return { error: { status: 503, code: 'ai_busy', message: '추천 엔진이 지금 붐빕니다. 1~2분 뒤 다시 시도해 주세요.' }, notes };
+}
+async function askGemini(env, prompt) { let text = ''; const r = await geminiStream(env, prompt, t => { text += t; }, { firstByteMs: 20000, totalMs: 40000 }); return r.ok ? { text, model: r.model, notes: r.notes } : r; }
+
+function recLine(line) {
+  const o = parse(line.trim().replace(/,$/, '')); if (!o || typeof o !== 'object') return null;
+  if (o.kind === 'profile') return { profile: cleanProfile(o) };
+  if (o.kind !== 'rec') return null;
+  const r = cleanItem(o); if (!r) return null;
+  r.axis = o.axis && typeof o.axis === 'object' ? { axis: clip(o.axis.axis, 20), detail: clip(o.axis.detail, 60) } : null;
+  r.start_with = r.type === 'track' ? '' : clip(o.start_with, 120);
+  return { rec: r };
 }
 
+// check one recommendation against Apple's catalogue (MusicBrainz as a fallback) and return what changed
+async function verifyOne(r, budget) {
+  const patch = {}; let fixed = false;
+  const take = n => { if (budget.n < n) return false; budget.n -= n; return true; };
+  if (r.type === 'track') {
+    if (!take(1)) return { patch, fixed };
+    const s = await findSong(r.artist, r.title);
+    if (s.cover) patch.cover = s.cover; if (s.link) patch.link = s.link;
+    if (s.albums.length && !s.albums.some(a => same(a, r.album)) && s.first && s.first !== r.album) { patch.album = s.first; fixed = true; }
+    return { patch, fixed };
+  }
+  if (!take(2)) return { patch, fixed };
+  const al = await findAlbum(r.artist, r.title);
+  let tracks = [];
+  if (al) {
+    if (al.cover) patch.cover = al.cover; if (al.link) patch.link = al.link;
+    if (take(1)) tracks = await albumTracks(al);
+  } else if (take(2)) { const mb = await mbTracks(r.artist, r.title); if (mb) { tracks = mb.tracks; if (mb.cover) patch.cover = mb.cover; } }
+  if (!tracks.length) return { patch, fixed };
+  const exact = r.start_with && tracks.find(t => same(t, r.start_with));
+  if (exact) { if (exact !== r.start_with) patch.start_with = exact; return { patch, fixed }; }
+  // not on this album: take the album's most popular song (Apple ranks song results by popularity)
+  let pick = '';
+  if (al && take(1)) {
+    const songs = await itunes({ term: r.artist, entity: 'song', limit: '50' }, al.country);
+    const hit = songs.find(x => x.collectionId === al.id) || songs.find(x => same(x.collectionName, r.title));
+    if (hit) pick = tracks.find(t => same(t, hit.trackName)) || hit.trackName;
+  }
+  if (pick) { patch.start_with = pick; return { patch, fixed: true }; }
+  patch.start_with = ''; return { patch, fixed: true, needPick: [...new Set(tracks)].slice(0, 30) };
+}
+
+// POST /api/recommend → a stream of JSON lines: profile, each rec as it is written, then fixes from the catalogue check
 async function recommend(req, env) {
   if (!env.GEMINI_API_KEY) return fail(500, 'config', '서버 설정(GEMINI_API_KEY)이 비어 있습니다.');
   const b = await readJson(req);
@@ -461,13 +479,42 @@ async function recommend(req, env) {
   if (items.length < 5) return fail(400, 'too_few', '음악을 5개 이상 담아 주세요.');
   const limit = int(env.REC_DAILY_LIMIT, 1, 1000, 20);
   if (await bump(env, 'rec:' + clientIp(req) + ':' + kstDay(), DAY) > limit) return fail(429, 'daily_limit', `오늘 받을 수 있는 추천 ${limit}회를 모두 사용했습니다. 내일 다시 이용해 주세요.`);
-  const ai = await askGemini(env, buildPrompt(items, (b && b.opts) || {}, b && b.more));
-  if (ai.error) return ai.error;
-  const res = parseLines(ai.text);
-  if (!res.recs.length) return fail(502, 'ai_format', '추천 결과를 읽지 못했습니다. 다시 시도해 주세요.');
-  let fixed = 0;
-  try { fixed = await verify(env, res.recs); } catch { fixed = -1; }
-  return json({ profile: res.profile, recs: res.recs, fixed });
+  const prompt = buildPrompt(items, (b && b.opts) || {}, b && b.more);
+  const { readable, writable } = new TransformStream();
+  const w = writable.getWriter(), te = new TextEncoder();
+  const send = o => w.write(te.encode(JSON.stringify(o) + '\n')).catch(() => {});
+  (async () => {
+    const budget = { n: 40 }, checks = [], recs = [], seen = new Set(), picks = [];
+    let buf = '', fixed = 0;
+    const onLine = line => {
+      const x = recLine(line); if (!x) return;
+      if (x.profile) { send({ t: 'profile', profile: x.profile }); return; }
+      const r = x.rec, k = (r.artist + '|' + r.title).toLowerCase(); if (seen.has(k)) return; seen.add(k);
+      const i = recs.push(r) - 1; send({ t: 'rec', i, rec: r });
+      checks.push(verifyOne(r, budget).then(({ patch, fixed: f, needPick }) => { if (f) fixed++; if (needPick) picks.push({ i, r, tracks: needPick }); if (Object.keys(patch).length) send({ t: 'fix', i, patch }); }).catch(() => {}));
+    };
+    try {
+      const res = await geminiStream(env, prompt, txt => {
+        buf += txt.replace(/```(?:json)?/g, '');
+        let k; while ((k = buf.indexOf('\n')) >= 0) { onLine(buf.slice(0, k)); buf = buf.slice(k + 1); }
+      });
+      if (buf.trim()) onLine(buf);
+      if (!res.ok) { if (!recs.length) await send({ t: 'error', ...res.error, notes: res.notes }); }
+      else if (!recs.length) await send({ t: 'error', code: 'ai_format', message: '추천 결과를 읽지 못했습니다. 다시 시도해 주세요.' });
+      await Promise.race([Promise.all(checks), new Promise(r => setTimeout(r, 20000))]);
+      if (picks.length) {
+        // albums only MusicBrainz knows: one quick call on the lightest model chooses a song from the real tracklist
+        const ask = picks.map((x, n) => `${n}. ${x.r.artist} — ${x.r.title}\n   실제 트랙리스트: ${x.tracks.join(' / ')}`).join('\n');
+        let txt = '';
+        const q = await geminiStream({ ...env, GEMINI_MODEL: 'gemini-3.5-flash-lite', GEMINI_FALLBACKS: 'gemini-3.6-flash' }, `다음 앨범마다 처음 듣는 사람에게 권할 대표곡 하나를 반드시 주어진 실제 트랙리스트 안에서 골라라.\n${ask}\nJSON 배열만 출력: [{"n":0,"track":"트랙리스트에 적힌 그대로"}]`, t => { txt += t; }, { firstByteMs: 8000, totalMs: 12000 });
+        const out = q.ok ? parse(txt.replace(/```(?:json)?/g, '').trim().replace(/^[^[]*/, '').replace(/[^\]]*$/, '')) : null;
+        picks.forEach((x, n) => { const o = arr(out).find(v => v && +v.n === n); const t = o && x.tracks.find(tr => same(tr, o.track)); if (t) send({ t: 'fix', i: x.i, patch: { start_with: t } }); });
+      }
+      if (recs.length) await send({ t: 'done', fixed, model: res.model || '' });
+    } catch (e) { await send({ t: 'error', code: 'server_error', message: '서버에서 문제가 생겼습니다. 잠시 후 다시 시도해 주세요.' }); }
+    finally { await w.close().catch(() => {}); }
+  })();
+  return new Response(readable, { headers: { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
 }
 
 // open /api/health in a browser — reports yes/no only, never secret values
@@ -484,9 +531,9 @@ async function health(env, req) {
   return json({
     version: 2, db, gemini_key: !!k,
     gemini_key_format: k ? (k.trim() !== k ? 'has_spaces' : /^AQ\./.test(k) ? 'AQ' : /^AIza/.test(k) ? 'AIza' : 'unknown') : null,
-    pin_pepper: !!env.PIN_PEPPER, admins: admins(env).length, model: env.GEMINI_MODEL || 'gemini-3.8-flash (default)',
+    pin_pepper: !!env.PIN_PEPPER, admins: admins(env).length, models: modelList(env),
     ai_test: new URL(req.url).searchParams.get('ai') === '1' && k
-      ? await (async () => { const r = await askGemini(env, 'Reply with the single word: ok', 20000); return r.text ? { ok: true, reply: r.text.slice(0, 40) } : { ok: false, notes: r.notes }; })()
+      ? await (async () => { const r = await askGemini(env, 'Reply with the single word: ok'); return r.text ? { ok: true, model: r.model, reply: r.text.slice(0, 40), notes: r.notes } : { ok: false, notes: r.notes }; })()
       : '주소 끝에 ?ai=1 을 붙이면 Gemini 연결을 실제로 시험합니다',
   });
 }
