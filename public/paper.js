@@ -134,7 +134,7 @@
     schedule(s);
   }
   const start = () => {
-    install(document.getElementById('view-music'), 11);
+    install(document.getElementById('view-music'), 23);
     install(document.getElementById('view-community'), 23);
     install(document.getElementById('side'), 37, { scroller: true });
     install(document.querySelector('.modal-card'), 51, { scroller: true });

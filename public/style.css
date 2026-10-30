@@ -599,3 +599,6 @@ button,a,summary,label{-webkit-tap-highlight-color:transparent}
 .card .card-foot{margin-top:.35em}
 /* listening icons in the middle */
 .outlinks{justify-content:center}
+/* [더보기] under the feed and MY ACTIVITY */
+.list-more{display:flex;justify-content:center;padding-top:calc(var(--lh) * .4em)}
+.cfeed>.more-li{list-style:none;border:0}

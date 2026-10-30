@@ -114,14 +114,24 @@ async function logout(req, env) {
 /* ---------------- community snapshot ---------------- */
 const parse = s => { try { return JSON.parse(s); } catch { return null; } };
 const postOut = r => ({ id: 'p' + r.id, uname: keyOf(r.user_id), kind: r.kind, items: arr(parse(r.items)), profile: parse(r.profile), why: r.why || '', createdAt: r.created_at });
+const FEED_PAGE = 60;
+// GET /api/feed?before=<createdAt>&bid=<post key>&user=<user key> — older posts, page by page ([더보기])
+async function feedPage(req, env) {
+  const p = new URL(req.url).searchParams, before = int(p.get('before'), 0, 9e15, 0), bid = /^p(\d{1,12})$/.exec(p.get('bid') || ''), uid = idOf(p.get('user'));
+  const where = ["kind != 'add'"], args = [];
+  if (before) { where.push('(created_at < ? OR (created_at = ? AND id < ?))'); args.push(before, before, bid ? +bid[1] : 0); }
+  if (uid) { where.push('user_id = ?'); args.push(uid); }
+  const { results } = await env.DB.prepare(`SELECT * FROM posts WHERE ${where.join(' AND ')} ORDER BY created_at DESC, id DESC LIMIT ${FEED_PAGE}`).bind(...args).all();
+  return json({ feed: results.map(postOut), more: results.length === FEED_PAGE });
+}
 async function community(req, env) {
   const me = await currentUser(req, env), admin = isAdmin(env, me);
   const day = kstDay();
   const [posts, users, picks] = await env.DB.batch([
-    env.DB.prepare('SELECT * FROM posts ORDER BY created_at DESC, id DESC LIMIT 200'),
+    env.DB.prepare(`SELECT * FROM posts WHERE kind != 'add' ORDER BY created_at DESC, id DESC LIMIT ${FEED_PAGE}`),
     env.DB.prepare(`SELECT u.id, u.nickname, u.created_at, u.locked_until,
         (SELECT COUNT(*) FROM visits v WHERE v.target_id = u.id) AS visits,
-        (SELECT COUNT(*) FROM posts p WHERE p.user_id = u.id) AS posts,
+        (SELECT COUNT(*) FROM posts p WHERE p.user_id = u.id AND p.kind != 'add') AS posts,
         COALESCE((SELECT MAX(created_at) FROM posts p WHERE p.user_id = u.id), u.created_at) AS last
       FROM users u ORDER BY last DESC LIMIT 500`),
     env.DB.prepare('SELECT * FROM picks WHERE day = ? ORDER BY created_at DESC').bind(day),
@@ -129,7 +139,7 @@ async function community(req, env) {
   const adm = admins(env);
   return json({
     me: me ? meOut(env, me) : null,
-    feed: posts.results.map(postOut),
+    feed: posts.results.map(postOut), feedMore: posts.results.length === FEED_PAGE,
     users: users.results.map(u => ({ key: keyOf(u.id), username: u.nickname, createdAt: u.created_at, last: u.last, visits: u.visits, posts: u.posts, lockedUntil: admin ? u.locked_until : 0 })),
     picks: picks.results.map(p => ({ id: 'k' + p.user_id, uname: keyOf(p.user_id), day: p.day, item: parse(p.item), createdAt: p.created_at })).filter(p => p.item),
     admins: users.results.filter(u => adm.includes(String(u.nickname).toLowerCase())).map(u => keyOf(u.id)),
@@ -154,9 +164,9 @@ async function putLibrary(req, env, me) {
 /* ---------------- posts, picks, visits, messages ---------------- */
 async function addPost(req, env, me) {
   const b = await readJson(req);
-  const kind = ['add', 'found', 'analysis'].includes(b && b.kind) ? b.kind : null;
+  const kind = ['found', 'analysis'].includes(b && b.kind) ? b.kind : null;
   if (!kind) return fail(400, 'bad_kind', '소식 종류가 올바르지 않습니다.');
-  const items = arr(b.items).slice(0, kind === 'add' ? 30 : 16).map(cleanItem).filter(Boolean);
+  const items = arr(b.items).slice(0, 16).map(cleanItem).filter(Boolean);
   if (!items.length) return fail(400, 'empty', '올릴 음악이 없습니다.');
   if (await bump(env, 'post:' + me.id + ':' + Math.floor(now() / 3600000), 3600000) > 60) return fail(429, 'too_many', '소식은 1시간에 60개까지 올릴 수 있습니다.');
   const profile = kind === 'analysis' ? cleanProfile(b.profile) : null;
@@ -247,6 +257,11 @@ async function getJson(url, headers = {}, ttl = 86400) {
     return r.ok ? await r.json() : null;
   } catch { return null; }
 }
+async function itunesRaw(params, country = 'US') {
+  const u = new URL('https://itunes.apple.com/search');
+  Object.entries({ media: 'music', limit: '8', country, ...params }).forEach(([k, v]) => u.searchParams.set(k, v));
+  const d = await getJson(u.toString()); return d ? arr(d.results) : null;
+}
 async function itunes(params, country = 'US') {
   const u = new URL('https://itunes.apple.com/search');
   Object.entries({ media: 'music', limit: '8', country, ...params }).forEach(([k, v]) => u.searchParams.set(k, v));
@@ -286,6 +301,79 @@ async function findSong(artist, title) {
   const list = (await itunes({ term: `${artist} ${title}`, entity: 'song', limit: '15' })).filter(x => same(x.artistName, artist) && same(x.trackName, title));
   const original = list.find(x => !/greatest|best of|hits|collection|anthology|essential|live/i.test(x.collectionName)) || list[0];
   return { albums: list.map(x => x.collectionName), first: original ? original.collectionName : '', cover: original ? art600(original.artworkUrl100) : '', link: original ? okUrl(original.trackViewUrl, LINK_HOST) : '' };
+}
+
+// responses the browser may keep for a while (and Cloudflare caches at the edge)
+async function cached(req, ttl, make) {
+  const cache = typeof caches !== 'undefined' ? caches.default : null, key = new Request(new URL(req.url).toString());
+  if (cache) { const hit = await cache.match(key).catch(() => null); if (hit) return hit; }
+  const data = await make();
+  const res = new Response(JSON.stringify(data), { headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': `public, max-age=${ttl}` } });
+  if (cache && data && !data.partial) await cache.put(key, res.clone()).catch(() => {});
+  return res;
+}
+// GET /api/cover?type=&artist=&title= — a cover from Apple (US, KR), Deezer or the Cover Art Archive
+async function coverLookup(req) {
+  const p = new URL(req.url).searchParams, artist = clip(p.get('artist'), 120), title = clip(p.get('title'), 160), track = p.get('type') === 'track';
+  if (!artist || !title) return json({ cover: '' });
+  return cached(req, 86400 * 7, async () => {
+    const tried = { ok: 0 };
+    const seen = r => { if (r) tried.ok++; return r; };
+    for (const c of ['US', 'KR']) {
+      const list = seen(await itunesRaw({ term: `${artist} ${title}`, entity: track ? 'song' : 'album', limit: '10' }, c));
+      const hit = arr(list).find(x => same(x.artistName, artist) && same(track ? x.trackName : x.collectionName, title));
+      if (hit) return { cover: art600(hit.artworkUrl100), from: 'apple' };
+    }
+    const q = track ? `artist:"${artist.replace(/"/g, '')}" track:"${title.replace(/"/g, '')}"` : `artist:"${artist.replace(/"/g, '')}" album:"${title.replace(/"/g, '')}"`;
+    const d = seen(await getJson(`https://api.deezer.com/search/${track ? 'track' : 'album'}?limit=10&q=${encodeURIComponent(q)}`));
+    const dh = d && arr(d.data).find(x => same(x.artist && x.artist.name, artist) && same(x.title, title));
+    const dc = dh && okUrl((track ? dh.album : dh) && ((track ? dh.album : dh).cover_xl || (track ? dh.album : dh).cover_big), COVER_HOST);
+    if (dc) return { cover: dc, from: 'deezer' };
+    if (!track) {
+      const s = seen(await getJson(`https://musicbrainz.org/ws/2/release-group?fmt=json&limit=5&query=${encodeURIComponent(`releasegroup:"${title.replace(/"/g, '')}" AND artist:"${artist.replace(/"/g, '')}"`)}`, { 'user-agent': UA }, 604800));
+      const rg = s && arr(s['release-groups']).find(x => same(x.title, title));
+      if (rg) {
+        const caa = await fetch(`https://coverartarchive.org/release-group/${rg.id}/front-500`, { method: 'HEAD', redirect: 'manual', signal: AbortSignal.timeout(6000) }).catch(() => null);
+        if (caa && (caa.status === 307 || caa.status === 302 || caa.status === 200)) return { cover: `https://coverartarchive.org/release-group/${rg.id}/front-500`, from: 'caa' };
+      }
+    }
+    return { cover: '', partial: !tried.ok };
+  });
+}
+// GET /api/artist?name=&dz= — one artist's albums and best-known songs (Apple US + KR, Deezer)
+async function artistLookup(req) {
+  const p = new URL(req.url).searchParams, name = clip(p.get('name'), 120); let dz = int(p.get('dz'), 0, 1e12, 0);
+  if (!name) return json({ albums: [], songs: [] });
+  return cached(req, 86400, async () => {
+    const mine = a => same(a, name) || norm(a) === norm(name);
+    const [usA, krA, usS, dzS] = await Promise.all([
+      itunesRaw({ term: name, entity: 'album', attribute: 'artistTerm', limit: '100' }, 'US'),
+      itunesRaw({ term: name, entity: 'album', attribute: 'artistTerm', limit: '60' }, 'KR'),
+      itunesRaw({ term: name, entity: 'song', attribute: 'artistTerm', limit: '25' }, 'US'),
+      dz ? Promise.resolve(null) : getJson(`https://api.deezer.com/search/artist?limit=5&q=${encodeURIComponent(name)}`),
+    ]);
+    if (!dz && dzS) { const h = arr(dzS.data).find(x => mine(x.name)); if (h) dz = h.id; }
+    const [dzA, dzT] = dz ? await Promise.all([getJson(`https://api.deezer.com/artist/${dz}/albums?limit=100`), getJson(`https://api.deezer.com/artist/${dz}/top?limit=10`)]) : [null, null];
+    const albums = [], seenA = new Set(), addA = o => { const k = norm(o.title); if (!k || seenA.has(k)) return; seenA.add(k); albums.push(o); };
+    [...arr(usA), ...arr(krA)].filter(x => mine(x.artistName)).forEach(x => addA({ type: 'album', title: String(x.collectionName || '').replace(/ - (Single|EP)$/, ''), artist: x.artistName, year: String(x.releaseDate || '').slice(0, 4), genre: x.primaryGenreName || '', cover: art600(x.artworkUrl100), link: okUrl(x.collectionViewUrl, LINK_HOST), single: / - Single$/.test(x.collectionName) || (x.trackCount || 9) <= 3, ep: / - EP$/.test(x.collectionName) }));
+    arr(dzA && dzA.data).forEach(x => addA({ type: 'album', title: x.title, artist: name, year: String(x.release_date || '').slice(0, 4), cover: okUrl(x.cover_xl || x.cover_big, COVER_HOST), single: x.record_type === 'single', ep: x.record_type === 'ep' }));
+    const songs = [], seenS = new Set(), addS = o => { const k = norm(o.title); if (!k || seenS.has(k) || songs.length >= 10) return; seenS.add(k); songs.push(o); };
+    arr(usS).filter(x => mine(x.artistName)).forEach(x => addS({ type: 'track', title: x.trackName, artist: x.artistName, album: String(x.collectionName || '').replace(/ - (Single|EP)$/, ''), year: String(x.releaseDate || '').slice(0, 4), genre: x.primaryGenreName || '', cover: art600(x.artworkUrl100), link: okUrl(x.trackViewUrl, LINK_HOST) }));
+    arr(dzT && dzT.data).forEach(x => addS({ type: 'track', title: x.title_short || x.title, artist: name, album: x.album && x.album.title || '', cover: okUrl(x.album && (x.album.cover_xl || x.album.cover_big), COVER_HOST) }));
+    return { albums, songs, partial: !usA && !krA && !dzA };
+  });
+}
+// GET /api/search?q= — the same search through our server, for when the browser can't reach the catalogues
+async function searchLookup(req) {
+  const q = clip(new URL(req.url).searchParams.get('q'), 80);
+  if (q.length < 1) return json({ items: [] });
+  return cached(req, 3600, async () => {
+    const [kr, us, dz] = await Promise.all([
+      itunesRaw({ term: q, entity: 'song', limit: '25' }, 'KR'), itunesRaw({ term: q, entity: 'album', limit: '15' }, 'US'),
+      getJson(`https://api.deezer.com/search/album?limit=12&q=${encodeURIComponent(q)}`),
+    ]);
+    return { apple: [...arr(kr), ...arr(us)], deezer: arr(dz && dz.data), partial: !kr && !us && !dz };
+  });
 }
 
 // GET /api/charts — what's being played most in Korea right now (Apple Music, cached for hours)
@@ -619,6 +707,13 @@ async function health(env, req) {
     version: 2, db, gemini_key: !!k,
     gemini_key_format: k ? (k.trim() !== k ? 'has_spaces' : /^AQ\./.test(k) ? 'AQ' : /^AIza/.test(k) ? 'AIza' : 'unknown') : null,
     pin_pepper: !!env.PIN_PEPPER, admins: admins(env).length, models: modelList(env),
+    catalogues: new URL(req.url).searchParams.get('up') === '1'
+      ? Object.fromEntries(await Promise.all([
+        ['apple', 'https://itunes.apple.com/search?media=music&entity=album&limit=1&term=radiohead'],
+        ['deezer', 'https://api.deezer.com/search/album?limit=1&q=radiohead'],
+        ['musicbrainz', 'https://musicbrainz.org/ws/2/artist?fmt=json&limit=1&query=radiohead'],
+      ].map(async ([k, u]) => { try { const r = await fetch(u, { headers: { 'user-agent': UA, accept: 'application/json' }, signal: AbortSignal.timeout(8000) }); return [k, r.status]; } catch (e) { return [k, 'error']; } })))
+      : '주소 끝에 ?up=1 을 붙이면 Apple·Deezer·MusicBrainz 연결을 시험합니다',
     ai_test: new URL(req.url).searchParams.get('ai') === '1' && k
       ? await (async () => { const r = await askGemini(env, 'Reply with the single word: ok'); return r.text ? { ok: true, model: r.model, reply: r.text.slice(0, 40), notes: r.notes } : { ok: false, notes: r.notes }; })()
       : '주소 끝에 ?ai=1 을 붙이면 Gemini 연결을 실제로 시험합니다',
@@ -639,6 +734,10 @@ export async function onRequest(context) {
     if (route === 'community' && m === 'GET') return await community(req, env);
     if (route === 'info' && m === 'GET') return await info(req, env);
     if (route === 'charts' && m === 'GET') return await charts();
+    if (route === 'feed' && m === 'GET') return await feedPage(req, env);
+    if (route === 'cover' && m === 'GET') return await coverLookup(req);
+    if (route === 'artist' && m === 'GET') return await artistLookup(req);
+    if (route === 'search' && m === 'GET') return await searchLookup(req);
     if (route === 'img' && m === 'GET') return await img(req);
     if (route === 'recommend' && m === 'POST') return await recommend(req, env);
     if (parts[0] === 'users' && parts.length === 2 && m === 'GET') return await profile(req, env, parts[1]);
