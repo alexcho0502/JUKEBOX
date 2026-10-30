@@ -103,13 +103,23 @@
       s.src = url + (url.includes('?') ? '&' : '?') + 'callback=' + cb; document.head.append(s);
     });
   }
+  // Apple answers about 20 searches a minute per person. Every browser call to Apple goes through this gate:
+  // searches someone is typing get the whole allowance, checks get most of it, background work (covers, years) only a little.
+  const AP = { log: [], coolUntil: 0 };
+  function apple(url, prio = 'low', ms = 6000) {
+    const t = Date.now(); AP.log = AP.log.filter(x => t - x < 60000);
+    const cap = prio === 'high' ? 19 : prio === 'mid' ? 15 : 8;
+    if (AP.log.length >= cap || (prio !== 'high' && t < AP.coolUntil)) return Promise.resolve(null);
+    AP.log.push(t);
+    return jsonp(url, ms).then(d => { if (!d) AP.coolUntil = Date.now() + 30000; return d; });
+  }
   const art600 = u => String(u || '').replace(/\/\d+x\d+bb\./, '/600x600bb.');
   const fromItunes = x => x.wrapperType === 'track'
     ? { type: 'track', title: x.trackName, artist: x.artistName, album: x.collectionName || '', year: String(x.releaseDate || '').slice(0, 4), genre: x.primaryGenreName || '', cover: art600(x.artworkUrl100), link: x.trackViewUrl || '' }
     : { type: 'album', title: String(x.collectionName || '').replace(/ - (Single|EP)$/, ''), artist: x.artistName, year: String(x.releaseDate || '').slice(0, 4), genre: x.primaryGenreName || '', cover: art600(x.artworkUrl100), link: x.collectionViewUrl || '' };
   async function itunesSearch(term, type, limit = 8) {
     const q = `https://itunes.apple.com/search?media=music&entity=${type === 'track' ? 'song' : 'album'}&limit=${limit}&term=${enc(term)}`;
-    const res = await Promise.all(['US', 'KR'].map(c => jsonp(q + '&country=' + c)));
+    const res = await Promise.all(['US', 'KR'].map(c => apple(q + '&country=' + c, 'low')));
     const seen = new Set(), out = [];
     res.forEach(d => arr(d && d.results).forEach(x => { const it = fromItunes(x); const k = itemKey(it); if (it.title && it.artist && !seen.has(k)) { seen.add(k); out.push(it); } }));
     return out;
@@ -124,7 +134,7 @@
 
   /* ---------------- covers: find a missing or broken cover, remember it ---------------- */
   // loose title matching: accents, brackets, "- Single", deluxe/remaster tags and "the" don't matter
-  const fold = s => String(s || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/&/g, ' and ').replace(/[’'`´]/g, '');
+  const fold = s => String(s || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/&/g, ' and ').replace(/(^|\s)['’]?n['’]?(?=\s)/g, ' and ').replace(/[’'`´]/g, '');
   const core = s => fold(s).replace(/\(.*?\)|\[.*?\]/g, ' ').replace(/\s[-–—]\s.*$/, ' ').replace(/\b(feat|ft|with)\b\.?.*$/, ' ')
     .replace(/\b(deluxe|expanded|edition|remaster(ed)?|anniversary|version|bonus|tracks?|reissue|mono|stereo)\b/g, ' ').replace(/^\s*the\s+/, '')
     .replace(/[^a-z0-9぀-ヿ㐀-鿿가-힣]+/g, '');
@@ -178,10 +188,10 @@
     if (du && await imgOk(du)) return { u: du, answered };
     // 3) Apple straight from the browser (both storefronts), then by title alone
     const q = `https://itunes.apple.com/search?media=music&entity=${track ? 'song' : 'album'}&limit=12&term=${enc(a + ' ' + t)}`;
-    const ap = (await Promise.all(['US', 'KR'].map(c => jsonp(q + '&country=' + c, 5000).then(seen)))).flatMap(d => arr(d && d.results));
+    const ap = (await Promise.all(['US', 'KR'].map(c => apple(q + '&country=' + c, 'low', 5000).then(seen)))).flatMap(d => arr(d && d.results));
     let hit = ap.find(x => okA(x.artistName) && looseEq(track ? x.trackName : x.collectionName, t));
     if (!hit) {
-      const ap2 = seen(await jsonp(`https://itunes.apple.com/search?media=music&entity=${track ? 'song' : 'album'}&limit=25&country=US&term=${enc(t)}`, 5000));
+      const ap2 = seen(await apple(`https://itunes.apple.com/search?media=music&entity=${track ? 'song' : 'album'}&limit=25&country=US&term=${enc(t)}`, 'low', 5000));
       hit = arr(ap2 && ap2.results).find(x => looseEq(track ? x.trackName : x.collectionName, t) && (okA(x.artistName) || core(x.artistName).slice(0, 4) === core(a).slice(0, 4)));
     }
     if (hit && await imgOk(art600(hit.artworkUrl100))) return { u: art600(hit.artworkUrl100), answered };
@@ -195,7 +205,7 @@
     const q = `https://itunes.apple.com/search?media=music&entity=${track ? 'song' : 'album'}&limit=15&term=${enc(r.artist + ' ' + r.title)}`;
     let appleAnswered = false, a = null;
     for (const c of ['US', 'KR']) {
-      const d = await jsonp(q + '&country=' + c, 6000); if (d) appleAnswered = true;
+      const d = await apple(q + '&country=' + c, 'mid'); if (d) appleAnswered = true;
       a = arr(d && d.results).find(x => looseEq(x.artistName, r.artist) && looseEq(track ? x.trackName : x.collectionName, r.title));
       if (a) { a.country = c; break; }
     }
@@ -210,13 +220,14 @@
   }
   // the real tracklist of an Apple album (one lookup)
   async function appleTracks(id, country) {
-    const d = await jsonp(`https://itunes.apple.com/lookup?id=${id}&entity=song&country=${country || 'US'}`, 6000);
+    const d = await apple(`https://itunes.apple.com/lookup?id=${id}&entity=song&country=${country || 'US'}`, 'mid');
     return arr(d && d.results).filter(x => x.wrapperType === 'track').map(x => x.trackName);
   }
   const repairQ = new Map(), triedAt = new Map(); let repairing = false;
   function scanCovers() {
     $$('.art[data-ck]').forEach(a => {
       if (a.classList.contains('pending')) return;
+      if ((state.isExample && a.closest('#music-list')) || a.closest('.empty')) return;   // examples keep their drawn covers
       const n = a.nextElementSibling; if (n && n.classList.contains('art-img')) return;
       const k = a.dataset.ck, c = coverMap[k];
       if (c && (c.u || Date.now() - c.t < 20 * 60000)) { if (c.u) a.insertAdjacentHTML('afterend', coverImg(c.u)); return; }
@@ -618,14 +629,14 @@
     let s = S.cache.get(q);
     if (!s) {
       s = {
-        apple: jsonp(`https://itunes.apple.com/search?media=music&entity=song&limit=25&country=KR&term=${enc(q)}`, 5000),
+        apple: apple(`https://itunes.apple.com/search?media=music&entity=song&limit=25&country=KR&term=${enc(q)}`, 'high', 5000),
         // Apple's US store straight from the browser too: the fullest catalogue (the KR store lacks many older Western albums)
-        us: q.length >= 3 ? jsonp(`https://itunes.apple.com/search?media=music&entity=album&limit=15&country=US&term=${enc(q)}`, 5000) : Promise.resolve(null),
+        us: q.length >= 3 ? apple(`https://itunes.apple.com/search?media=music&entity=album&limit=15&country=US&term=${enc(q)}`, 'high', 5000) : Promise.resolve(null),
         al: dz(`search/album?limit=12&q=${enc(q)}`),
         tr: dz(`search/track?limit=15&q=${enc(q)}`),
         ar: dz(`search/artist?limit=5&q=${enc(q)}`),
         // our server asks Apple's US store (the fullest catalogue; the KR store lacks many older Western albums) and Deezer
-        srv: q.length >= 2 ? api('search?q=' + enc(q)).catch(() => null) : Promise.resolve(null),
+        srv: q.length >= 3 ? new Promise(r => setTimeout(r, 450)).then(() => (S.q === q || qEl.value.trim() === q ? api('search?q=' + enc(q)).catch(() => null) : null)) : Promise.resolve(null),
       };
       S.cache.set(q, s); if (S.cache.size > 80) S.cache.delete(S.cache.keys().next().value);
     }
@@ -732,9 +743,9 @@
     if (!a.p) a.p = (async () => {
       const srvP = api(`artist?name=${enc(a.name)}`).catch(() => null);
       const [al, alUS, so, dzA] = await Promise.all([
-        jsonp(`https://itunes.apple.com/search?media=music&entity=album&attribute=artistTerm&limit=80&country=KR&term=${enc(a.name)}`, 6000),
-        jsonp(`https://itunes.apple.com/search?media=music&entity=album&attribute=artistTerm&limit=100&country=US&term=${enc(a.name)}`, 6000),
-        jsonp(`https://itunes.apple.com/search?media=music&entity=song&attribute=artistTerm&limit=25&country=KR&term=${enc(a.name)}`, 6000),
+        apple(`https://itunes.apple.com/search?media=music&entity=album&attribute=artistTerm&limit=80&country=KR&term=${enc(a.name)}`, a.bg ? 'low' : 'high'),
+        apple(`https://itunes.apple.com/search?media=music&entity=album&attribute=artistTerm&limit=100&country=US&term=${enc(a.name)}`, a.bg ? 'low' : 'high'),
+        a.bg ? Promise.resolve(null) : apple(`https://itunes.apple.com/search?media=music&entity=song&attribute=artistTerm&limit=25&country=KR&term=${enc(a.name)}`, 'high'),
         a.dzId ? Promise.all([dz(`artist/${a.dzId}/albums?limit=60`), dz(`artist/${a.dzId}/top?limit=10`)]) : Promise.resolve([null, null]),
       ]);
       const mine = it => core(it.artist) === key || looseEq(it.artist, a.name);
@@ -754,8 +765,8 @@
       const mb = arr(srv && srv.mb);
       if (!mb.length) return { full: albums.filter(x => !x.single && !x.ep), small: albums.filter(x => x.single || x.ep), other: [], songs };
       // RYM-style discography from MusicBrainz: studio albums in release order; Apple lends covers and links where titles match
-      const apple = new Map(albums.map(x => [core(x.title), x])), used = new Set();
-      const withApple = x => { const ap = apple.get(core(x.title)); if (ap) used.add(ap); return remember(ap ? { ...x, cover: ap.cover || x.cover, link: ap.link || '', genre: ap.genre || '' } : { ...x }); };
+      const byTitle = new Map(albums.map(x => [core(x.title), x])), used = new Set();
+      const withApple = x => { const ap = byTitle.get(core(x.title)); if (ap) used.add(ap); return remember(ap ? { ...x, cover: ap.cover || x.cover, link: ap.link || '', genre: ap.genre || '' } : { ...x }); };
       const full = mb.filter(x => x.kind === 'album').map(withApple).filter(Boolean);
       const small = [...mb.filter(x => x.kind === 'ep' || x.kind === 'single').map(withApple), ...albums.filter(x => (x.single || x.ep) && !used.has(x))].filter(Boolean);
       const other = [...mb.filter(x => !['album', 'ep', 'single'].includes(x.kind)).map(withApple), ...albums.filter(x => !x.single && !x.ep && !used.has(x))].filter(Boolean);
@@ -806,7 +817,7 @@
     drawQ(more, chart);
     const tasks = [chartAlbums().then(c => { chart = c; })];
     mine.forEach(name => {
-      const a = S.artists.get(core(name)) || { name, w: 0, dzId: 0 }; S.artists.set(core(name), a);
+      const a = S.artists.get(core(name)) || { name, w: 0, dzId: 0, bg: true }; S.artists.set(core(name), a);
       tasks.push(artistData(a).then(d => { more.push({ a: name, list: d.full.filter(it => !inList(it)).slice(0, 3) }); }).catch(() => {}));
     });
     await Promise.all(tasks.map(t => t.then(() => { if (seq === S.seq && S.view === 'quick' && !qEl.value.trim()) drawQ(more.slice().sort((x, y) => mine.indexOf(x.a) - mine.indexOf(y.a)), chart); })));
@@ -1536,6 +1547,6 @@
   setView(location.hash ? location.hash.slice(1) : 'music');
   if (auth) pullLib();
   refresh();
-  if (state.items.some(it => it.pending || !it.cover)) enrich(state.items.filter(it => !it.cover).slice(0, 30));
+  if (!state.isExample && state.items.some(it => it.pending || !it.cover)) enrich(state.items.filter(it => !it.cover).slice(0, 30));
   setInterval(() => { if (document.visibilityState === 'visible') renderRail(); }, 60000);
 })();

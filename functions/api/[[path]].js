@@ -255,7 +255,7 @@ async function adminUnlock(env, me, key) {
 }
 
 /* ---------------- catalogue helpers (Apple iTunes Search + MusicBrainz) ---------------- */
-const norm = t => String(t || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/&/g, ' and ').replace(/[’'`]/g, '')
+const norm = t => String(t || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/&/g, ' and ').replace(/(^|\s)['’]?n['’]?(?=\s)/g, ' and ').replace(/[’'`]/g, '')
   .replace(/\(.*?\)|\[.*?\]|\s-\s(single|ep)$|feat\..*$|-\s*(\d{4}\s*)?remaster.*$/g, '').replace(/^the\s+/, '').replace(/[^a-z0-9가-힣]+/g, '');
 const same = (a, b) => { const x = norm(a), y = norm(b); return !!x && !!y && (x === y || (x.length > 4 && y.length > 4 && (x.includes(y) || y.includes(x)))); };
 const art600 = u => okUrl(String(u || '').replace(/\/\d+x\d+bb\./, '/600x600bb.'), COVER_HOST);
@@ -288,7 +288,10 @@ async function getJson(url, headers = {}, ttl = 86400) {
   if (url.startsWith('https://musicbrainz.org/')) await mbTurn(headers['x-priority'] === 'high');
   try {
     const { 'x-priority': _p, ...hdrs } = headers;
-    const r = await fetch(url, { headers: { accept: 'application/json', ...hdrs }, cf: { cacheTtl: ttl, cacheEverything: true }, signal: AbortSignal.timeout(8000) });
+    const go = () => fetch(url, { headers: { accept: 'application/json', ...hdrs }, cf: { cacheTtl: ttl, cacheEverything: true }, signal: AbortSignal.timeout(8000) });
+    let r = await go();
+    // MusicBrainz answers 503 when it's busy (it shares limits across Cloudflare's addresses): wait a moment, try once more
+    if (r.status === 503 && url.startsWith('https://musicbrainz.org/')) { await new Promise(res => setTimeout(res, 1200)); r = await go(); }
     return r.ok ? await r.json() : null;
   } catch { return null; }
 }
