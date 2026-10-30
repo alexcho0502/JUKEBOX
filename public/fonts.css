@@ -1,5 +1,0 @@
-/* Latin and figures: Merchant Copy (free for personal, non-commercial use — see README).
-   Hangul: Galmuri14 (SIL Open Font License, fonts/GALMURI-OFL.txt). */
-@font-face{font-family:"Merchant Copy";font-weight:400;font-display:swap;src:url(/fonts/merchant-copy.ttf) format("truetype");size-adjust:141%;ascent-override:68%;descent-override:13%;line-gap-override:0%}
-@font-face{font-family:"Merchant Copy XL";font-weight:400;font-display:swap;src:url(/fonts/merchant-copy-doublesize.ttf) format("truetype");size-adjust:69%;ascent-override:139%;descent-override:27%;line-gap-override:0%}
-@font-face{font-family:"Galmuri";font-weight:400;font-display:swap;src:url(/fonts/galmuri14.woff2) format("woff2");ascent-override:97%;descent-override:7%;line-gap-override:0%}
