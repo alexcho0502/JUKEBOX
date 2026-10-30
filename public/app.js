@@ -1,6 +1,7 @@
 
 (() => {
   'use strict';
+  const BUILD = '2026.10.30-2135';   // also shown at the bottom of the page and in /api/health — tells which version a browser is running
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -361,7 +362,7 @@
   function exportCSS() {
     // the site's stylesheets with the fonts inlined, @media rules dropped (the export is laid out at its own size)
     if (!exportCssP) exportCssP = (async () => {
-      let css = (await Promise.all(['/fonts.css', '/style.css'].map(u => fetch(u).then(r => r.text())))).join('\n');
+      let css = (await Promise.all(['/fonts.css', '/style.css'].map(u => fetch(u + '?v=' + BUILD).then(r => r.text())))).join('\n');
       for (const m of [...new Set(css.match(/url\(\/fonts\/[^)]+\)/g) || [])]) {
         try { css = css.split(m).join(`url(${await fetchData(m.slice(4, -1))})`); } catch (e) { /* fall back to system fonts */ }
       }
@@ -688,14 +689,24 @@
     }
     // artists: names that the query starts, weighted by how often they came back
     const cand = new Map(m ? m.artists : []);
-    scored.slice(0, 40).forEach(([v, it]) => { const k = core(it.artist); const a = cand.get(k) || { name: it.artist, w: 0, dzId: 0 }; a.w += .25; cand.set(k, a); });
-    const arts = [...cand.entries()].map(([k, a]) => {
+    // artists with the same name are kept apart by their MusicBrainz id (there are several "Black Star"s)
+    scored.slice(0, 40).forEach(([v, it]) => {
+      const nk = core(it.artist), k = it.arid ? nk + '|' + it.arid : nk;
+      let a = cand.get(k);
+      if (!a && it.arid && cand.has(nk) && !cand.get(nk).arid) { a = cand.get(nk); cand.delete(nk); }    // an Apple/Deezer name meets its MusicBrainz id
+      a = a || { name: it.artist, w: 0, dzId: 0 };
+      if (it.arid && !a.arid) { a.arid = it.arid; a.hint = it.title; }
+      a.w += .25; cand.set(k, a);
+    });
+    const sameName = new Map(); cand.forEach(a => { const nk = core(a.name); sameName.set(nk, (sameName.get(nk) || 0) + 1); });
+    const arts = [...cand.entries()].map(([key, a]) => {
+      const k = core(a.name);
       const ws = words(a.name), toks = words(q);
       let s = toks.every(t => ws.some(w => w.startsWith(t)) || k.includes(t)) ? 2 : -9;
       if (k === qc) s += 4; else if (k.startsWith(qc)) s += 2;
       return { ...a, s: s + a.w };
     }).filter(a => a.s >= 2.6).sort((x, y) => y.s - x.s).slice(0, 3);
-    arts.forEach(a => S.artists.set(core(a.name), a));
+    arts.forEach(a => { if (sameName.get(core(a.name)) < 2) delete a.hint; S.artists.set(core(a.name) + (a.arid ? '|' + a.arid : ''), a); });
     return { albums, songs, arts };
   }
 
@@ -708,7 +719,7 @@
   }
   function rowArtist(a) {
     const n = S.rows.push({ kind: 'artist', a }) - 1;
-    return `<button type="button" class="ac-art" role="option" id="aco-${n}" data-n="${n}"><span>${esc(a.name)}</span><span>앨범 전체 보기</span></button>`;
+    return `<button type="button" class="ac-art" role="option" id="aco-${n}" data-n="${n}"><span>${esc(a.name)}${a.hint ? ` <small>· ${esc(a.hint)}</small>` : ''}</span><span>앨범 전체 보기</span></button>`;
   }
   const head = (l, r = '') => `<div class="ac-h"><span>${l}</span>${r}</div>`;
   const closeBtn = '<button type="button" class="ac-close" data-ac-close>닫기</button>';
@@ -764,7 +775,7 @@
   async function artistData(a) {
     const key = core(a.name);
     if (!a.p) a.p = (async () => {
-      const srvP = api(`artist?name=${enc(a.name)}`).catch(() => null);
+      const srvP = api(`artist?name=${enc(a.name)}${a.arid ? '&mbid=' + a.arid : ''}`).catch(() => null);
       const [al, alUS, so, dzA] = await Promise.all([
         Promise.resolve(null),
         apple(`https://itunes.apple.com/search?media=music&entity=album&attribute=artistTerm&limit=100&country=${/[가-힣]/.test(a.name) ? 'KR' : 'US'}&term=${enc(a.name)}`, a.bg ? 'low' : 'high'),
@@ -800,7 +811,7 @@
     return p;
   }
   async function openArtist(a) {
-    const seq = ++S.seq; S.view = 'artist'; S.artistName = a.name; S.showSingles = false; S.showOther = false;
+    const seq = ++S.seq; S.view = 'artist'; S.artistName = a.name; S.curArtist = a; S.showSingles = false; S.showOther = false;
     S.rows = [];
     paint(head(`<button type="button" class="ac-back" data-ac-back>‹ 뒤로</button>&nbsp;${esc(a.name.toUpperCase())}`, closeBtn) + '<p class="ac-rule" aria-hidden="true"></p><div class="ac-loading"><span class="dots">앨범을 모으고 있습니다</span></div>');
     a.onQuick = q => { if (seq === S.seq && S.view === 'artist' && (q.full.length || q.small.length || q.songs.length)) drawArtist(a, { ...q, loading: true }); };
@@ -867,7 +878,7 @@
       state.items.splice(i, 1); renderList(); save(); scheduleLibSync();
       toast(`뺐습니다 · ${state.items.length}개`);
     } else {
-      const { single, ep, derived, p, kind, mbid, ...clean } = it;
+      const { single, ep, derived, p, kind, mbid, arid, ...clean } = it;
       if (addItems([{ ...clean }], { quiet: true })) toast(`담았습니다 · ${state.items.length}개${state.items.length < MIN ? ` (${MIN - state.items.length}개 더)` : ''}`);
     }
     $$(`#music-ac [data-n]`).forEach(b => { const x = S.rows[+b.dataset.n]; if (x && x.kind === 'item') b.setAttribute('aria-selected', String(inList(x.it))); });
@@ -900,9 +911,9 @@
   acEl.addEventListener('click', e => {
     if (e.target.closest('[data-ac-close]')) { hideAc(); return; }
     if (e.target.closest('[data-ac-back]')) { const q = qEl.value.trim(); q ? runSearch(q) : openQuick(); return; }
-    if (e.target.closest('[data-ac-other]')) { S.showOther = !S.showOther; const a = S.artists.get(core(S.artistName)); if (a && a.p) a.p.then(d => drawArtist(a, d)); return; }
-    if (e.target.closest('[data-ac-singles]')) { S.showSingles = !S.showSingles; const a = S.artists.get(core(S.artistName)); if (a && a.p) a.p.then(d => drawArtist(a, d)); return; }
-    if (e.target.closest('[data-ac-retry]')) { openArtist(S.artists.get(core(S.artistName)) || { name: S.artistName, w: 0, dzId: 0 }); return; }
+    if (e.target.closest('[data-ac-other]')) { S.showOther = !S.showOther; const a = S.curArtist; if (a && a.p) a.p.then(d => drawArtist(a, d)); return; }
+    if (e.target.closest('[data-ac-singles]')) { S.showSingles = !S.showSingles; const a = S.curArtist; if (a && a.p) a.p.then(d => drawArtist(a, d)); return; }
+    if (e.target.closest('[data-ac-retry]')) { openArtist(S.curArtist || { name: S.artistName, w: 0, dzId: 0 }); return; }
     const ma = e.target.closest('[data-ac-artist]');
     if (ma) { const name = ma.dataset.acArtist; openArtist(S.artists.get(core(name)) || { name, w: 0, dzId: 0 }); return; }
     const b = e.target.closest('[data-n]'); if (b) toggleRow(+b.dataset.n);

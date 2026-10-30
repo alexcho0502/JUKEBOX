@@ -307,7 +307,7 @@ async function mbExists(type, artist, title) {
   const a = artist.replace(/"/g, ''), t = title.replace(/"/g, '');
   const ent = type === 'track' ? 'recording' : 'release-group';
   const q = type === 'track' ? `recording:"${t}" AND artist:"${a}"` : `releasegroup:"${t}" AND artist:"${a}"`;
-  const s = await getJson(`https://musicbrainz.org/ws/2/${ent}?fmt=json&limit=10&query=${encodeURIComponent(q)}`, { 'user-agent': UA, 'x-priority': 'high' }, 604800);
+  const s = await getJson(`https://musicbrainz.org/ws/2/${ent}?fmt=json&limit=10&query=${encodeURIComponent(q)}`, { 'user-agent': UA }, 604800);
   if (!s) return { mb: null };
   const list = arr(type === 'track' ? s.recordings : s['release-groups']);
   const hit = list.find(x => same(x.title, title) && arr(x['artist-credit']).some(c => same(c.name || (c.artist && c.artist.name), artist) || same(c.artist && c.artist.name, artist)));
@@ -353,7 +353,7 @@ async function coverLookup(req) {
     const dc = dh && okUrl((track ? dh.album : dh) && ((track ? dh.album : dh).cover_xl || (track ? dh.album : dh).cover_big), COVER_HOST);
     if (dc) return { cover: dc, from: 'deezer' };
     if (!track) {
-      const s = seen(await getJson(`https://musicbrainz.org/ws/2/release-group?fmt=json&limit=5&query=${encodeURIComponent(`releasegroup:"${title.replace(/"/g, '')}" AND artist:"${artist.replace(/"/g, '')}"`)}`, { 'user-agent': UA, 'x-priority': 'mid' }, 604800));
+      const s = seen(await getJson(`https://musicbrainz.org/ws/2/release-group?fmt=json&limit=5&query=${encodeURIComponent(`releasegroup:"${title.replace(/"/g, '')}" AND artist:"${artist.replace(/"/g, '')}"`)}`, { 'user-agent': UA }, 604800));
       const rg = s && arr(s['release-groups']).find(x => same(x.title, title));
       if (rg) return { cover: `https://coverartarchive.org/release-group/${rg.id}/front-250`, from: 'caa', year: String(rg['first-release-date'] || '').slice(0, 4) };
     }
@@ -364,22 +364,22 @@ async function coverLookup(req) {
 // and the like as secondary types. kind 'album' = a plain studio album (RYM "Album").
 const mbCredit = ac => arr(ac).map(c => (c.name || (c.artist && c.artist.name) || '') + (c.joinphrase || '')).join('').trim();
 const mbKind = rg => { const p = rg['primary-type'] || '', s = arr(rg['secondary-types']); if (p === 'Album') return s.length ? String(s[0]).toLowerCase() : 'album'; return p === 'EP' ? 'ep' : p === 'Single' ? 'single' : 'other'; };
-const fromMbRg = (rg, artist) => { const kind = mbKind(rg); return { type: 'album', title: clip(rg.title, 160), artist: clip(artist || mbCredit(rg['artist-credit']), 120), year: String(rg['first-release-date'] || '').slice(0, 4), cover: `https://coverartarchive.org/release-group/${rg.id}/front-250`, mbid: rg.id, kind, single: kind === 'single', ep: kind === 'ep' }; };
+const fromMbRg = (rg, artist, arid) => { const kind = mbKind(rg), ac = arr(rg['artist-credit']); return { type: 'album', title: clip(rg.title, 160), artist: clip(artist || mbCredit(ac), 120), year: String(rg['first-release-date'] || '').slice(0, 4), cover: `https://coverartarchive.org/release-group/${rg.id}/front-250`, mbid: rg.id, arid: arid || (ac.length === 1 && ac[0].artist && ac[0].artist.id) || '', kind, single: kind === 'single', ep: kind === 'ep' }; };
 const luceneWords = q => String(q).replace(/[+\-&|!(){}[\]^"~*?:\\/]/g, ' ').replace(/\s+/g, ' ').trim();
 
 // GET /api/artist?name= — one artist's discography: MusicBrainz (RYM-style, in release order) + Apple when reachable
 async function artistLookup(req) {
-  const p = new URL(req.url).searchParams, name = clip(p.get('name'), 120);
+  const p = new URL(req.url).searchParams, name = clip(p.get('name'), 120), arid = /^[0-9a-f-]{36}$/.test(p.get('mbid') || '') ? p.get('mbid') : '';
   if (!name) return json({ mb: [], albums: [], songs: [] });
   return cached(req, 86400, async () => {
     const mine = a => same(a, name) || norm(a) === norm(name);
     const [usA, usS, mbA] = await Promise.all([
       itunesRaw({ term: name, entity: 'album', attribute: 'artistTerm', limit: '100' }, 'US'),
       itunesRaw({ term: name, entity: 'song', attribute: 'artistTerm', limit: '25' }, 'US'),
-      getJson(`https://musicbrainz.org/ws/2/artist?fmt=json&limit=5&query=${encodeURIComponent(`artist:"${name.replace(/"/g, '')}"`)}`, { 'user-agent': UA, 'x-priority': 'high' }, 604800),
+      arid ? Promise.resolve({ artists: [{ id: arid, name }] }) : getJson(`https://musicbrainz.org/ws/2/artist?fmt=json&limit=5&query=${encodeURIComponent(`artist:"${name.replace(/"/g, '')}"`)}`, { 'user-agent': UA }, 604800),
     ]);
     const ar = arr(mbA && mbA.artists).find(x => mine(x.name)) || arr(mbA && mbA.artists).find(x => (x.score || 0) >= 98);
-    const rgs = ar ? await getJson(`https://musicbrainz.org/ws/2/release-group?fmt=json&limit=100&artist=${ar.id}&type=album|ep`, { 'user-agent': UA, 'x-priority': 'high' }, 86400) : null;
+    const rgs = ar ? await getJson(`https://musicbrainz.org/ws/2/release-group?fmt=json&limit=100&artist=${ar.id}&type=album|ep`, { 'user-agent': UA }, 86400) : null;
     const mb = arr(rgs && rgs['release-groups']).map(rg => fromMbRg(rg, ar.name)).filter(x => x.title)
       .sort((x, y) => (x.year || '9999').localeCompare(y.year || '9999'));
     const albums = [], seenA = new Set();
@@ -394,9 +394,14 @@ async function searchLookup(req) {
   const q = luceneWords(clip(new URL(req.url).searchParams.get('q'), 80)).toLowerCase();   // lower case: AND/OR/NOT stay plain words
   if (q.length < 2) return json({ items: [] });
   return cached(req, 3600, async () => {
-    const query = `(releasegroup:(${q}) OR artist:(${q})) AND (primarytype:album OR primarytype:ep)`;
-    const s = await getJson(`https://musicbrainz.org/ws/2/release-group?fmt=json&limit=40&query=${encodeURIComponent(query)}`, { 'user-agent': UA, 'x-priority': 'high' }, 86400);
-    return { items: arr(s && s['release-groups']).filter(rg => (rg.score || 0) >= 40).map(rg => fromMbRg(rg)).filter(x => x.title && x.artist), partial: !s };
+    const words = q.split(' ').filter(w => w.length > 0 && !/^(and|or|not|the|a|of)$/.test(w)).slice(0, 8);
+    const types = '(primarytype:album OR primarytype:ep)';
+    const strict = `${words.map(w => `(releasegroup:${w} OR artist:${w} OR artistname:${w})`).join(' AND ')} AND ${types}`;
+    const loose = `(releasegroup:(${q}) OR artist:(${q})) AND ${types}`;
+    const ask = query => getJson(`https://musicbrainz.org/ws/2/release-group?fmt=json&limit=40&query=${encodeURIComponent(query)}`, { 'user-agent': UA }, 86400);
+    let s = words.length ? await ask(strict) : null;
+    if (!words.length || (s && !arr(s['release-groups']).length)) s = await ask(loose);
+    return { items: arr(s && s['release-groups']).filter(rg => (rg.score || 0) >= 30).map(rg => fromMbRg(rg)).filter(x => x.title && x.artist), partial: !s };
   });
 }
 
@@ -772,7 +777,7 @@ async function health(env, req) {
   }
   const k = env.GEMINI_API_KEY || '';
   return json({
-    version: 2, db, gemini_key: !!k,
+    version: 2, build: '2026.10.30-2135', db, gemini_key: !!k,
     gemini_key_format: k ? (k.trim() !== k ? 'has_spaces' : /^AQ\./.test(k) ? 'AQ' : /^AIza/.test(k) ? 'AIza' : 'unknown') : null,
     pin_pepper: !!env.PIN_PEPPER, admins: admins(env).length, models: modelList(env),
     deezer_here: new URL(req.url).searchParams.get('up') === '1' ? await deezerOpen() : undefined,

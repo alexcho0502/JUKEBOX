@@ -637,3 +637,30 @@ button,a,summary,label{-webkit-tap-highlight-color:transparent}
 .entry>.search-kv .k{font-weight:700}
 .q-x{font-size:.8em;bottom:.3em}
 .q-wrap input[type=search]{padding-right:2.4em}
+.ac-art small{font-size:.85em;opacity:.8}
+/* v3.2: bigger where it matters on a phone */
+.entry>.search-kv{font-size:1.2em}
+.entry>.search-kv .k{font-size:1.25em;line-height:1}
+.btn-bar{height:5.8em}
+.btn-bar .bar-lbl{font-size:1.78em;padding:.14em .5em .1em}
+@media (max-width:720px){
+  .btn-bar{height:6.2em}
+  .btn-bar .bar-lbl{font-size:1.62em;letter-spacing:.02em}
+}
+.entry>.search-kv{grid-template-columns:auto minmax(0,1fr);gap:0 .8em}
+.q-wrap input[type=search]:placeholder-shown{padding-right:0}
+/* v3.3: a touch bigger again */
+.entry>.search-kv .k{font-size:1.42em}
+.btn-bar .bar-lbl{font-size:1.95em;padding:.14em .4em .1em}
+@media (max-width:720px){
+  .btn-bar .bar-lbl{font-size:1.76em;letter-spacing:0;padding:.14em .35em .1em;max-width:96%}
+}
+.entry>.search-kv{gap:0 .3em}
+.entry>.search-kv input[type=search]{font-size:max(16px,.9em)}
+.foot .build{opacity:.55;font-size:11px;margin-top:6px}
+/* v3.4: SEARCH on its own line, the box under it at full width (nothing gets cut off on a phone) */
+.entry>.search-kv{grid-template-columns:minmax(0,1fr);row-gap:calc(var(--lh) * .2em);font-size:1.2em}
+.entry>.search-kv .k{font-size:1.42em;line-height:1.05}
+.entry>.search-kv .q-wrap{width:100%}
+.entry>.search-kv input[type=search]{font-size:max(16px,1em)}
+.q-wrap input[type=search]:focus-visible{outline:none;background-image:repeating-linear-gradient(90deg,var(--ink) 0 .44em,transparent .44em .5em);background-size:100% 2.5px}
