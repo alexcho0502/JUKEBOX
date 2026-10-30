@@ -531,14 +531,13 @@
   async function enrich(items) {
     for (const it of items) {
       try {
+        if (!it.cover || !it.year) {
+          const s = await api(`cover?type=${it.type === 'track' ? 'track' : 'album'}&artist=${enc(it.artist)}&title=${enc(it.title)}`).catch(() => null);
+          if (s) { if (s.cover && !it.cover) it.cover = s.cover; if (s.year && !it.year) it.year = s.year; if (s.genre && !it.genre) it.genre = s.genre; if (s.link && !it.link) it.link = s.link; }
+        }
         if (!it.cover) {
           const hit = (await itunesSearch(`${it.artist} ${it.title}`, it.type, 8)).find(x => looseEq(x.artist, it.artist) && looseEq(x.title, it.title)) || null;
           if (hit) { it.cover = hit.cover; it.link = hit.link; if (!it.year) it.year = hit.year; if (!it.genre) it.genre = hit.genre; if (hit.album && it.type === 'track') it.album = hit.album; }
-        }
-        if (!it.cover || !it.year) {
-          // the browser couldn't reach Apple (or found nothing): ask through our server
-          const s = await api(`cover?type=${it.type === 'track' ? 'track' : 'album'}&artist=${enc(it.artist)}&title=${enc(it.title)}`).catch(() => null);
-          if (s) { if (s.cover && !it.cover) it.cover = s.cover; if (s.year && !it.year) it.year = s.year; if (s.genre && !it.genre) it.genre = s.genre; if (s.link && !it.link) it.link = s.link; }
         }
         const x = await catalogInfo(it);
         if (x.year) it.year = x.year;
@@ -601,7 +600,9 @@
     let s = S.cache.get(q);
     if (!s) {
       s = {
-        apple: jsonp(`https://itunes.apple.com/search?media=music&entity=song&limit=30&country=KR&term=${enc(q)}`, 5000),
+        apple: jsonp(`https://itunes.apple.com/search?media=music&entity=song&limit=25&country=KR&term=${enc(q)}`, 5000),
+        // Apple's US store straight from the browser too: the fullest catalogue (the KR store lacks many older Western albums)
+        us: q.length >= 3 ? jsonp(`https://itunes.apple.com/search?media=music&entity=album&limit=15&country=US&term=${enc(q)}`, 5000) : Promise.resolve(null),
         al: dz(`search/album?limit=12&q=${enc(q)}`),
         tr: dz(`search/track?limit=15&q=${enc(q)}`),
         ar: dz(`search/artist?limit=5&q=${enc(q)}`),
@@ -616,6 +617,7 @@
     const rank = new Map(), bump = (it, r) => { const k = ck(it); rank.set(k, (rank.get(k) || 0) + r); };
     const add = (list, w) => list.forEach((it, i, a) => { const m = remember(it); if (m) bump(m, w * (1 - i / Math.max(8, a.length))); });
     if (got.apple) add(arr(got.apple.results).flatMap(fromApple), 2);
+    if (got.us) add(arr(got.us.results).flatMap(fromApple), 2);
     if (got.al) add(arr(got.al.data).map(fromDzAlbum), 1.6);
     if (got.tr) add(arr(got.tr.data).flatMap(fromDzTrack), 1.2);
     if (got.srv) { add(arr(got.srv.apple).flatMap(fromApple), 1.8); add(arr(got.srv.deezer).map(fromDzAlbum), 1.4); }
@@ -639,7 +641,7 @@
     const albums = [], songs = [], seenA = new Set(), seenS = new Set();
     for (const [, it] of scored) {
       const sig = core(it.artist) + '|' + core(it.title);
-      if (it.type === 'album') { if (albums.length < 6 && !seenA.has(sig)) { seenA.add(sig); albums.push(it); } }
+      if (it.type === 'album') { if (albums.length < 8 && !seenA.has(sig)) { seenA.add(sig); albums.push(it); } }
       else if (songs.length < 5 && !seenS.has(sig)) { seenS.add(sig); songs.push(it); }
     }
     // artists: names that the query starts, weighted by how often they came back
@@ -696,19 +698,27 @@
       got[k] = d; left--;
       if (seq === S.seq && S.view === 'search') drawSearch(q, merge(q, got), left > 0);
     })));
+    // a catalogue that didn't answer (busy, rate-limited) is asked again next time instead of being remembered as empty
+    const failed = Object.entries(got).filter(([k, d]) => !d && !(k === 'us' && q.length < 3)).map(([k]) => k);
+    if (failed.length && S.cache.get(q) === s) S.cache.delete(q);
+    const appleDown = !got.apple && !got.us && !(got.srv && arr(got.srv.apple).length);
+    if (appleDown && seq === S.seq && S.view === 'search') {
+      const f = acEl.querySelector('.ac-foot span'); if (f) f.textContent = 'Apple Music이 잠시 응답하지 않습니다. 잠깐 뒤 다시 입력해 보세요';
+    }
   }
   // one artist's albums and best-known songs
   async function artistData(a) {
     const key = core(a.name);
     if (!a.p) a.p = (async () => {
       const srvP = api(`artist?name=${enc(a.name)}${a.dzId ? '&dz=' + a.dzId : ''}`).catch(() => null);
-      const [al, so, dzA] = await Promise.all([
+      const [al, alUS, so, dzA] = await Promise.all([
         jsonp(`https://itunes.apple.com/search?media=music&entity=album&attribute=artistTerm&limit=80&country=KR&term=${enc(a.name)}`, 6000),
+        jsonp(`https://itunes.apple.com/search?media=music&entity=album&attribute=artistTerm&limit=100&country=US&term=${enc(a.name)}`, 6000),
         jsonp(`https://itunes.apple.com/search?media=music&entity=song&attribute=artistTerm&limit=25&country=KR&term=${enc(a.name)}`, 6000),
         a.dzId ? Promise.all([dz(`artist/${a.dzId}/albums?limit=60`), dz(`artist/${a.dzId}/top?limit=10`)]) : Promise.resolve([null, null]),
       ]);
       const mine = it => core(it.artist) === key || looseEq(it.artist, a.name);
-      let albums = arr(al && al.results).flatMap(fromApple).filter(it => it.type === 'album' && mine(it)).map(remember).filter(Boolean);
+      let albums = [...arr(al && al.results), ...arr(alUS && alUS.results)].flatMap(fromApple).filter(it => it.type === 'album' && mine(it)).map(remember).filter(Boolean);
       let songs = arr(so && so.results).flatMap(fromApple).filter(it => it.type === 'track' && mine(it)).map(remember).filter(Boolean);
       const srv = await srvP;
       arr(srv && srv.albums).map(remember).filter(Boolean).forEach(it => { if (!albums.some(x => core(x.title) === core(it.title))) albums.push(it); });
