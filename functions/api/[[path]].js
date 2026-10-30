@@ -5,8 +5,8 @@
 const DAY = 86400000;
 const SESSION_DAYS = 60;
 const NICK_RE = /^[0-9A-Za-z가-힣_]{2,12}$/;
-const COVER_HOST = /(^|\.)mzstatic\.com$|^coverartarchive\.org$|(^|\.)archive\.org$/;
-const LINK_HOST = /^(music|itunes)\.apple\.com$|^musicbrainz\.org$/;
+const COVER_HOST = /(^|\.)mzstatic\.com$|^coverartarchive\.org$|(^|\.)archive\.org$|(^|\.)dzcdn\.net$/;
+const LINK_HOST = /^(music|itunes)\.apple\.com$|^musicbrainz\.org$|^(www\.)?deezer\.com$/;
 const UA = 'JUKEBOX/2.0 (music taste receipts; https://pages.dev)';
 
 const now = () => Date.now();
@@ -274,10 +274,36 @@ async function mbTracks(artist, title) {
   const rg = rel['release-group'] && rel['release-group'].id;
   return { tracks, cover: rg ? `https://coverartarchive.org/release-group/${rg}/front-500` : '' };
 }
+// Deezer: a second catalogue for covers and tracklists Apple doesn't have
+async function dzAlbum(artist, title) {
+  const q = `artist:"${artist.replace(/"/g, '')}" album:"${title.replace(/"/g, '')}"`;
+  const d = await getJson(`https://api.deezer.com/search/album?limit=8&q=${encodeURIComponent(q)}`);
+  const hit = d && arr(d.data).find(x => same(x.artist && x.artist.name, artist) && same(x.title, title));
+  return hit ? { id: hit.id, cover: okUrl(hit.cover_xl || hit.cover_big, COVER_HOST), link: okUrl(hit.link, LINK_HOST) } : null;
+}
+async function dzTracks(id) { const d = await getJson(`https://api.deezer.com/album/${id}/tracks?limit=100`); return d ? arr(d.data).map(t => t.title) : []; }
 async function findSong(artist, title) {
   const list = (await itunes({ term: `${artist} ${title}`, entity: 'song', limit: '15' })).filter(x => same(x.artistName, artist) && same(x.trackName, title));
   const original = list.find(x => !/greatest|best of|hits|collection|anthology|essential|live/i.test(x.collectionName)) || list[0];
   return { albums: list.map(x => x.collectionName), first: original ? original.collectionName : '', cover: original ? art600(original.artworkUrl100) : '', link: original ? okUrl(original.trackViewUrl, LINK_HOST) : '' };
+}
+
+// GET /api/charts — what's being played most in Korea right now (Apple Music, cached for hours)
+async function charts() {
+  const d = await getJson('https://rss.applemarketingtools.com/api/v2/kr/music/most-played/25/albums.json', {}, 21600);
+  const albums = arr(d && d.feed && d.feed.results).map(x => ({ type: 'album', title: clip(x.name, 160), artist: clip(x.artistName, 120), year: clip(String(x.releaseDate || '').slice(0, 4), 6), genre: clip(arr(x.genres).map(g => g.name).filter(g => g !== 'Music')[0] || '', 80), cover: art600(x.artworkUrl100), link: okUrl(x.url, LINK_HOST) })).filter(x => x.title && x.artist);
+  return new Response(JSON.stringify({ albums }), { headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'public, max-age=3600' } });
+}
+// GET /api/img?u= — album art relayed for "영수증 출력" when the image host doesn't allow it directly (art hosts only)
+async function img(req) {
+  const u = okUrl(new URL(req.url).searchParams.get('u'), COVER_HOST);
+  if (!u) return fail(400, 'bad_url', '허용되지 않은 주소입니다.');
+  try {
+    const r = await fetch(u, { cf: { cacheTtl: 604800, cacheEverything: true }, signal: AbortSignal.timeout(8000) });
+    const type = r.headers.get('content-type') || '';
+    if (!r.ok || !/^image\//.test(type)) return fail(502, 'img', '이미지를 가져오지 못했습니다.');
+    return new Response(r.body, { headers: { 'content-type': type, 'cache-control': 'public, max-age=604800', 'access-control-allow-origin': '*' } });
+  } catch { return fail(502, 'img', '이미지를 가져오지 못했습니다.'); }
 }
 
 // GET /api/info?artist=&title=&type= — year, genres and country from MusicBrainz (cached a week)
@@ -367,14 +393,23 @@ ${more ? '' : `첫 줄은 취향 프로필:
 {"kind":"rec","type":"album 또는 track","title":"...","artist":"...","year":"1998","album":"곡이면 수록 앨범","genre":"...","country":"...","axis":{"axis":"프로듀서","detail":"..."},"why":"...습니다. ...입니다.","start_with":"앨범이면 먼저 들어볼 곡","match":88}`;
 }
 
-// Gemini, streamed. Free models in order: if one is overloaded (503) or out of quota (429), move to the next at once.
+// Gemini, streamed — tuned for speed.
+// • The quick model goes first (the stronger one only for "깊게 분석" or as a backup).
+// • Hedging: if no text has arrived after a few seconds, the next model starts alongside and the first to answer wins.
+// • A stream that goes quiet is dropped instead of being waited on.
 // New AI Studio keys ("AQ.") use the Interactions endpoint, older "AIza" keys use generateContent.
-const modelList = env => [...new Set([env.GEMINI_MODEL || 'gemini-3.8-flash', ...String(env.GEMINI_FALLBACKS ?? 'gemini-3.6-flash,gemini-3.5-flash-lite').split(',').map(s => s.trim()).filter(Boolean)])];
+const fastModel = env => env.GEMINI_FAST_MODEL || 'gemini-3.6-flash';
+const deepModel = env => env.GEMINI_MODEL || 'gemini-3.8-flash';
+const modelList = (env, deep = false) => {
+  const extra = String(env.GEMINI_FALLBACKS ?? 'gemini-3.5-flash-lite').split(',').map(s => s.trim()).filter(Boolean);
+  return [...new Set(deep ? [deepModel(env), fastModel(env), ...extra] : [fastModel(env), ...extra, deepModel(env)])];
+};
 const thinkingFor = m => (/3\.8-flash$/.test(m) ? 'low' : /3\.6-flash$|^gemini-3-flash/.test(m) ? 'minimal' : '');
-async function* sse(body) {
+async function* sse(body, onAny) {
   const reader = body.getReader(), dec = new TextDecoder(); let buf = '';
   for (;;) {
     const { value, done } = await reader.read(); if (done) break;
+    onAny && onAny();
     buf += dec.decode(value, { stream: true });
     let k;
     while ((k = buf.indexOf('\n')) >= 0) {
@@ -389,46 +424,92 @@ function deltaText(api, d) {
   const parts = o.candidates && o.candidates[0] && o.candidates[0].content && o.candidates[0].content.parts;
   return Array.isArray(parts) ? parts.filter(p => !p.thought).map(p => p.text || '').join('') : '';
 }
-async function geminiStream(env, prompt, onText, { firstByteMs = 25000, totalMs = 100000 } = {}) {
-  const key = String(env.GEMINI_API_KEY || '').trim(), base = 'https://generativelanguage.googleapis.com/v1beta';
-  const notes = []; let quota = 0, tried = 0;
-  for (const model of modelList(env)) {
-    const apis = /^AIza/.test(key) ? ['generateContent', 'interactions'] : ['interactions', 'generateContent'];
-    let think = thinkingFor(model);
-    for (let a = 0; a < apis.length; a++) {
-      const api = apis[a];
-      const url = api === 'interactions' ? `${base}/interactions` : `${base}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
-      const body = api === 'interactions'
-        ? { model, input: prompt, stream: true, ...(think ? { generation_config: { thinking_level: think } } : {}) }
-        : { contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { temperature: 0.8, ...(think ? { thinkingConfig: { thinkingLevel: think } } : {}) } };
-      const ctl = new AbortController(); const t1 = setTimeout(() => ctl.abort(), firstByteMs); tried++;
-      let r;
-      try { r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': key, ...(api === 'interactions' ? { 'Api-Revision': '2026-05-20' } : {}) }, body: JSON.stringify(body), signal: ctl.signal }); }
-      catch (e) { clearTimeout(t1); notes.push(`${model}: 응답 없음`); break; }
-      clearTimeout(t1);
-      if (!r.ok) {
-        const raw = await r.text().catch(() => ''), j = parse(raw), msg = String(j && j.error && (j.error.message || j.error.status) || raw).slice(0, 140);
-        notes.push(`${model} ${api}: ${r.status} ${msg}`);
-        if (r.status === 400 && think) { think = ''; a--; continue; }          // this model rejects the thinking level: retry once without it
-        if (r.status === 429) { quota++; break; }                               // out of quota: next model
-        if ([500, 502, 503, 504].includes(r.status)) break;                     // overloaded: next model
-        if ([401, 403, 404].includes(r.status) && a === 0) continue;            // wrong endpoint for this key: try the other
-        break;
-      }
-      const t2 = setTimeout(() => ctl.abort(), totalMs); let got = 0;
-      try { for await (const d of sse(r.body)) { const txt = deltaText(api, d); if (txt) { got += txt.length; onText(txt); } } }
-      catch (e) { notes.push(`${model}: 응답이 끊김`); }
-      clearTimeout(t2);
-      if (got) return { ok: true, model, notes };
-      notes.push(`${model}: 빈 응답`); break;
-    }
+// open one model's stream (tries the other endpoint / no thinking level when the first is refused)
+async function openModel(key, model, prompt, signal, notes) {
+  const base = 'https://generativelanguage.googleapis.com/v1beta';
+  const apis = /^AIza/.test(key) ? ['generateContent', 'interactions'] : ['interactions', 'generateContent'];
+  let think = thinkingFor(model);
+  for (let a = 0; a < apis.length; a++) {
+    const api = apis[a];
+    const url = api === 'interactions' ? `${base}/interactions` : `${base}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
+    const body = api === 'interactions'
+      ? { model, input: prompt, stream: true, ...(think ? { generation_config: { thinking_level: think } } : {}) }
+      : { contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { temperature: 0.8, ...(think ? { thinkingConfig: { thinkingLevel: think } } : {}) } };
+    let r;
+    try { r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': key, ...(api === 'interactions' ? { 'Api-Revision': '2026-05-20' } : {}) }, body: JSON.stringify(body), signal }); }
+    catch (e) { notes.push(`${model}: ${signal.aborted ? '시간 초과' : '응답 없음'}`); return { fail: 'net' }; }
+    if (r.ok) return { r, api };
+    const raw = await r.text().catch(() => ''), j = parse(raw), msg = String(j && j.error && (j.error.message || j.error.status) || raw).slice(0, 140);
+    notes.push(`${model} ${api}: ${r.status} ${msg}`);
+    if (r.status === 400 && think) { think = ''; a--; continue; }
+    if (r.status === 429) return { fail: 'quota' };
+    if ([401, 403, 404].includes(r.status) && a === 0) continue;
+    return { fail: String(r.status) };
   }
-  if (quota && quota === modelList(env).length) return { error: { status: 429, code: 'ai_quota', message: '오늘 무료 추천 한도가 모두 사용되었습니다. 내일 다시 이용해 주세요.' }, notes };
-  if (notes.some(n => / 40[13] /.test(n))) return { error: { status: 502, code: 'ai_auth', message: 'Gemini API 키가 거부되었습니다. GEMINI_API_KEY 값을 확인해 주세요.' }, notes };
-  return { error: { status: 503, code: 'ai_busy', message: '추천 엔진이 지금 붐빕니다. 1~2분 뒤 다시 시도해 주세요.' }, notes };
+  return { fail: 'endpoint' };
 }
-async function askGemini(env, prompt) { let text = ''; const r = await geminiStream(env, prompt, t => { text += t; }, { firstByteMs: 20000, totalMs: 40000 }); return r.ok ? { text, model: r.model, notes: r.notes } : r; }
+async function geminiStream(env, prompt, onText, opt = {}) {
+  const { hedgeMs = 6000, firstTextMs = 22000, idleMs = 14000, totalMs = 75000, deep = false, models: only } = opt;
+  const key = String(env.GEMINI_API_KEY || '').trim(), models = only || modelList(env, deep), notes = [];
+  let quota = 0, next = 0, live = 0, winner = null, finished = false, hedgeT = 0, totalT = 0;
+  const runs = [];
+  return await new Promise(resolve => {
+    const finish = res => {
+      if (finished) return; finished = true; clearTimeout(hedgeT); clearTimeout(totalT);
+      runs.forEach(x => { if (x !== winner) x.ctl.abort(); clearTimeout(x.t); });
+      resolve(res);
+    };
+    const failAll = () => {
+      if (quota && quota === models.length) return finish({ error: { status: 429, code: 'ai_quota', message: '오늘 무료 추천 한도가 모두 사용되었습니다. 내일 다시 이용해 주세요.' }, notes });
+      if (notes.some(n => / 40[13] /.test(n))) return finish({ error: { status: 502, code: 'ai_auth', message: 'Gemini API 키가 거부되었습니다. GEMINI_API_KEY 값을 확인해 주세요.' }, notes });
+      finish({ error: { status: 503, code: 'ai_busy', message: '추천 엔진이 지금 붐빕니다. 1~2분 뒤 다시 시도해 주세요.' }, notes });
+    };
+    const launch = () => {
+      clearTimeout(hedgeT);
+      if (finished || winner) return;
+      if (next >= models.length) { if (!live) failAll(); return; }
+      const run = { model: models[next++], ctl: new AbortController(), t: 0 };
+      runs.push(run); live++;
+      const arm = ms => { clearTimeout(run.t); run.t = setTimeout(() => run.ctl.abort(), ms); };
+      arm(firstTextMs);
+      hedgeT = setTimeout(launch, hedgeMs);         // nothing yet → start the next model alongside
+      (async () => {
+        const o = await openModel(key, run.model, prompt, run.ctl.signal, notes);
+        if (!o.r) { if (o.fail === 'quota') quota++; return false; }
+        let got = 0;
+        try {
+          for await (const d of sse(o.r.body, () => { if (got) arm(idleMs); })) {
+            const txt = deltaText(o.api, d); if (!txt) continue;
+            if (!winner) { winner = run; clearTimeout(hedgeT); runs.forEach(x => { if (x !== run) x.ctl.abort(); }); }
+            if (winner !== run) { run.ctl.abort(); return false; }
+            got += txt.length; arm(idleMs); onText(txt);
+          }
+        } catch (e) { notes.push(`${run.model}: ${got ? '응답이 중간에 멈춤' : '첫 응답이 늦음'}`); }
+        clearTimeout(run.t);
+        if (got) { finish({ ok: true, model: run.model, notes }); return true; }
+        notes.push(`${run.model}: 빈 응답`); return false;
+      })().then(ok => { live--; if (!ok && !winner && !finished) launch(); }, () => { live--; if (!winner && !finished) launch(); });
+    };
+    totalT = setTimeout(() => { if (winner) { winner.ctl.abort(); finish({ ok: true, model: winner.model, notes: [...notes, '시간 제한으로 일부만 받음'] }); } else { notes.push('시간 초과'); runs.forEach(x => x.ctl.abort()); failAll(); } }, totalMs);
+    launch();
+  });
+}
+async function askGemini(env, prompt, opt = {}) { let text = ''; const r = await geminiStream(env, prompt, t => { text += t; }, { firstTextMs: 15000, totalMs: 30000, ...opt }); return r.ok ? { text, model: r.model, notes: r.notes } : r; }
 
+// hands over each complete {...} as soon as its closing brace arrives (one per line or pretty-printed — either works)
+function objects(onObj) {
+  let cur = '', depth = 0, inStr = false, esc = false;
+  return txt => {
+    for (const c of txt) {
+      if (!depth) { if (c === '{') { depth = 1; cur = '{'; } continue; }
+      cur += c;
+      if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+      if (c === '"') inStr = true;
+      else if (c === '{') depth++;
+      else if (c === '}' && !--depth) { onObj(cur); cur = ''; }
+    }
+  };
+}
 function recLine(line) {
   const o = parse(line.trim().replace(/,$/, '')); if (!o || typeof o !== 'object') return null;
   if (o.kind === 'profile') return { profile: cleanProfile(o) };
@@ -447,6 +528,11 @@ async function verifyOne(r, budget) {
     if (!take(1)) return { patch, fixed };
     const s = await findSong(r.artist, r.title);
     if (s.cover) patch.cover = s.cover; if (s.link) patch.link = s.link;
+    if (!s.cover && take(1)) {
+      const d = await getJson(`https://api.deezer.com/search/track?limit=8&q=${encodeURIComponent(`artist:"${r.artist.replace(/"/g, '')}" track:"${r.title.replace(/"/g, '')}"`)}`);
+      const h = d && arr(d.data).find(x => same(x.artist && x.artist.name, r.artist) && same(x.title, r.title));
+      if (h && h.album) { const c = okUrl(h.album.cover_xl || h.album.cover_big, COVER_HOST); if (c) patch.cover = c; }
+    }
     if (s.albums.length && !s.albums.some(a => same(a, r.album)) && s.first && s.first !== r.album) { patch.album = s.first; fixed = true; }
     return { patch, fixed };
   }
@@ -456,7 +542,11 @@ async function verifyOne(r, budget) {
   if (al) {
     if (al.cover) patch.cover = al.cover; if (al.link) patch.link = al.link;
     if (take(1)) tracks = await albumTracks(al);
-  } else if (take(2)) { const mb = await mbTracks(r.artist, r.title); if (mb) { tracks = mb.tracks; if (mb.cover) patch.cover = mb.cover; } }
+  } else {
+    const dz = take(1) ? await dzAlbum(r.artist, r.title) : null;
+    if (dz) { if (dz.cover) patch.cover = dz.cover; if (take(1)) tracks = await dzTracks(dz.id); }
+    if (!tracks.length && take(2)) { const mb = await mbTracks(r.artist, r.title); if (mb) { tracks = mb.tracks; if (mb.cover && !patch.cover) patch.cover = mb.cover; } }
+  }
   if (!tracks.length) return { patch, fixed };
   const exact = r.start_with && tracks.find(t => same(t, r.start_with));
   if (exact) { if (exact !== r.start_with) patch.start_with = exact; return { patch, fixed }; }
@@ -484,8 +574,8 @@ async function recommend(req, env) {
   const w = writable.getWriter(), te = new TextEncoder();
   const send = o => w.write(te.encode(JSON.stringify(o) + '\n')).catch(() => {});
   (async () => {
-    const budget = { n: 40 }, checks = [], recs = [], seen = new Set(), picks = [];
-    let buf = '', fixed = 0;
+    const budget = { n: 34 }, checks = [], recs = [], seen = new Set(), picks = [];
+    let fixed = 0;
     const onLine = line => {
       const x = recLine(line); if (!x) return;
       if (x.profile) { send({ t: 'profile', profile: x.profile }); return; }
@@ -494,19 +584,16 @@ async function recommend(req, env) {
       checks.push(verifyOne(r, budget).then(({ patch, fixed: f, needPick }) => { if (f) fixed++; if (needPick) picks.push({ i, r, tracks: needPick }); if (Object.keys(patch).length) send({ t: 'fix', i, patch }); }).catch(() => {}));
     };
     try {
-      const res = await geminiStream(env, prompt, txt => {
-        buf += txt.replace(/```(?:json)?/g, '');
-        let k; while ((k = buf.indexOf('\n')) >= 0) { onLine(buf.slice(0, k)); buf = buf.slice(k + 1); }
-      });
-      if (buf.trim()) onLine(buf);
+      const deep = !!(b && b.opts && b.opts.deep);
+      const res = await geminiStream(env, prompt, objects(onLine), deep ? { deep, hedgeMs: 14000, firstTextMs: 40000, totalMs: 85000 } : {});
       if (!res.ok) { if (!recs.length) await send({ t: 'error', ...res.error, notes: res.notes }); }
       else if (!recs.length) await send({ t: 'error', code: 'ai_format', message: '추천 결과를 읽지 못했습니다. 다시 시도해 주세요.' });
-      await Promise.race([Promise.all(checks), new Promise(r => setTimeout(r, 20000))]);
+      await Promise.race([Promise.all(checks), new Promise(r => setTimeout(r, 8000))]);
       if (picks.length) {
         // albums only MusicBrainz knows: one quick call on the lightest model chooses a song from the real tracklist
         const ask = picks.map((x, n) => `${n}. ${x.r.artist} — ${x.r.title}\n   실제 트랙리스트: ${x.tracks.join(' / ')}`).join('\n');
         let txt = '';
-        const q = await geminiStream({ ...env, GEMINI_MODEL: 'gemini-3.5-flash-lite', GEMINI_FALLBACKS: 'gemini-3.6-flash' }, `다음 앨범마다 처음 듣는 사람에게 권할 대표곡 하나를 반드시 주어진 실제 트랙리스트 안에서 골라라.\n${ask}\nJSON 배열만 출력: [{"n":0,"track":"트랙리스트에 적힌 그대로"}]`, t => { txt += t; }, { firstByteMs: 8000, totalMs: 12000 });
+        const q = await geminiStream(env, `다음 앨범마다 처음 듣는 사람에게 권할 대표곡 하나를 반드시 주어진 실제 트랙리스트 안에서 골라라.\n${ask}\nJSON 배열만 출력: [{"n":0,"track":"트랙리스트에 적힌 그대로"}]`, t => { txt += t; }, { models: ['gemini-3.5-flash-lite', 'gemini-3.6-flash'], hedgeMs: 3000, firstTextMs: 6000, totalMs: 9000 });
         const out = q.ok ? parse(txt.replace(/```(?:json)?/g, '').trim().replace(/^[^[]*/, '').replace(/[^\]]*$/, '')) : null;
         picks.forEach((x, n) => { const o = arr(out).find(v => v && +v.n === n); const t = o && x.tracks.find(tr => same(tr, o.track)); if (t) send({ t: 'fix', i: x.i, patch: { start_with: t } }); });
       }
@@ -551,6 +638,8 @@ export async function onRequest(context) {
     if (route === 'me' && m === 'GET') { const me = await currentUser(req, env); return json({ user: me ? meOut(env, me) : null }); }
     if (route === 'community' && m === 'GET') return await community(req, env);
     if (route === 'info' && m === 'GET') return await info(req, env);
+    if (route === 'charts' && m === 'GET') return await charts();
+    if (route === 'img' && m === 'GET') return await img(req);
     if (route === 'recommend' && m === 'POST') return await recommend(req, env);
     if (parts[0] === 'users' && parts.length === 2 && m === 'GET') return await profile(req, env, parts[1]);
 

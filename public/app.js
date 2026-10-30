@@ -66,9 +66,11 @@
     if (c.length >= 2) [c0, c1, c2] = [c[0], c[1], c[2] || c[0]];
     else { const h = hashN((o.artist || '') + (o.title || '')); c0 = `hsl(${h % 360} 45% 22%)`; c1 = `hsl(${(h + 40) % 360} 70% 55%)`; c2 = `hsl(${(h + 200) % 360} 65% 70%)`; }
     const style = ['minimal', 'type'].includes(o.style) ? o.style : 'mesh';
-    const t = String(o.title || '');
-    return `<div class="art art-${style} ${extra}" style="--c0:${c0};--c1:${c1};--c2:${c2}">${style === 'type' ? `<span class="tx">${esc(t.length > 24 ? t.slice(0, 22) + '…' : t)}</span>` : ''}</div>${/^https:\/\//.test(o.cover || '') ? `<img class="art-img" src="${esc(o.cover)}" alt="" loading="lazy" decoding="async" crossorigin="anonymous" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}`;
+    const t = String(o.title || ''), cov = coverOf(o);
+    const ref = o.artist && o.title ? ` data-ck="${esc(ck(o))}" data-a="${esc(o.artist)}" data-t="${esc(o.title)}" data-y="${o.type === 'track' ? 'track' : 'album'}"` : '';
+    return `<div class="art art-${style} ${extra}"${ref} style="--c0:${c0};--c1:${c1};--c2:${c2}">${style === 'type' ? `<span class="tx">${esc(t.length > 24 ? t.slice(0, 22) + '…' : t)}</span>` : ''}</div>${cov ? coverImg(cov) : ''}`;
   }
+  const coverImg = u => `<img class="art-img" src="${esc(u)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="window.__jbCoverFail&&window.__jbCoverFail(this)">`;
   const compact = it => ({ type: it.type === 'track' ? 'track' : 'album', title: String(it.title || '').slice(0, 160), artist: String(it.artist || '').slice(0, 120), album: String(it.album || '').slice(0, 160), year: String(it.year || '').slice(0, 6), genre: String(it.genre || arr(it.primary).join(', ') || '').slice(0, 80), country: String(it.country || '').slice(0, 40), colors: arr(it.colors).filter(x => HEX.test(String(x))).slice(0, 3), style: ['mesh', 'minimal', 'type'].includes(it.style) ? it.style : 'mesh', cover: /^https:\/\//.test(it.cover || '') ? it.cover : '', link: /^https:\/\//.test(it.link || '') ? it.link : '' });
   const itemKey = it => ((it.artist || '') + '|' + (it.title || '')).toLowerCase();
 
@@ -120,23 +122,183 @@
     return infoCache2.get(k);
   }
 
+  /* ---------------- covers: find a missing or broken cover, remember it ---------------- */
+  // loose title matching: accents, brackets, "- Single", deluxe/remaster tags and "the" don't matter
+  const fold = s => String(s || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/&/g, ' and ').replace(/[’'`´]/g, '');
+  const core = s => fold(s).replace(/\(.*?\)|\[.*?\]/g, ' ').replace(/\s[-–—]\s.*$/, ' ').replace(/\b(feat|ft|with)\b\.?.*$/, ' ')
+    .replace(/\b(deluxe|expanded|edition|remaster(ed)?|anniversary|version|bonus|tracks?|reissue|mono|stereo)\b/g, ' ').replace(/^\s*the\s+/, '')
+    .replace(/[^a-z0-9぀-ヿ㐀-鿿가-힣]+/g, '');
+  const looseEq = (a, b) => {
+    const x = core(a), y = core(b); if (!x || !y) return false; if (x === y) return true;
+    const n = Math.min(x.length, y.length);
+    return (n >= 3 && (x.startsWith(y) || y.startsWith(x))) || (n >= 5 && (x.includes(y) || y.includes(x)));
+  };
+  const ck = o => (o.type === 'track' ? 't|' : 'a|') + itemKey(o);
+  const COVERS = 'jukebox.v2.covers';
+  let coverMap = {}, badCover = new Set();
+  try { const s = JSON.parse(localStorage.getItem(COVERS) || 'null'); if (s) { coverMap = s.map || {}; badCover = new Set(arr(s.bad)); } } catch (e) { /* ignore */ }
+  const saveCovers = () => {
+    try {
+      const ks = Object.keys(coverMap); if (ks.length > 800) ks.slice(0, ks.length - 800).forEach(k => delete coverMap[k]);
+      localStorage.setItem(COVERS, JSON.stringify({ map: coverMap, bad: [...badCover].slice(-300) }));
+    } catch (e) { /* ignore */ }
+  };
+  function coverOf(o) {
+    const own = /^https:\/\//.test(o.cover || '') && !badCover.has(o.cover) ? o.cover : '';
+    const c = o.artist && o.title ? coverMap[ck(o)] : null;
+    return own || (c && c.u) || '';
+  }
+  const imgOk = url => new Promise(res => {
+    const im = new Image(), t = setTimeout(() => res(false), 7000);
+    im.referrerPolicy = 'no-referrer';
+    im.onload = () => { clearTimeout(t); res(im.naturalWidth > 1); }; im.onerror = () => { clearTimeout(t); res(false); };
+    im.src = url;
+  });
+  const dz = (path, ms = 4500) => jsonp(`https://api.deezer.com/${path}${path.includes('?') ? '&' : '?'}output=jsonp`, ms).then(d => (d && !d.error ? d : null));
+  const dzCover = a => (a && (a.cover_xl || a.cover_big || a.cover_medium)) || '';
+  async function findCover(o) {
+    const track = o.type === 'track', a = o.artist, t = o.title;
+    const okA = x => looseEq(x, a);
+    // 1) Deezer (generous rate limits, so it goes first)
+    const d1 = await dz(`search/${track ? 'track' : 'album'}?limit=10&q=${enc(`artist:"${a}" ${track ? 'track' : 'album'}:"${t}"`)}`);
+    const d2 = d1 && arr(d1.data).length ? d1 : await dz(`search/${track ? 'track' : 'album'}?limit=10&q=${enc(a + ' ' + t)}`);
+    const dh = d2 && arr(d2.data).find(x => okA(x.artist && x.artist.name) && looseEq(x.title, t));
+    const du = dh ? dzCover(track ? dh.album : dh) : '';
+    if (du && await imgOk(du)) return du;
+    // 2) Apple, both storefronts at once
+    const q = `https://itunes.apple.com/search?media=music&entity=${track ? 'song' : 'album'}&limit=12&term=${enc(a + ' ' + t)}`;
+    const ap = (await Promise.all(['US', 'KR'].map(c => jsonp(q + '&country=' + c, 5000)))).flatMap(d => arr(d && d.results));
+    let hit = ap.find(x => okA(x.artistName) && looseEq(track ? x.trackName : x.collectionName, t));
+    if (hit && await imgOk(art600(hit.artworkUrl100))) return art600(hit.artworkUrl100);
+    // 3) Apple by title alone (artist names are sometimes written differently)
+    const ap2 = await jsonp(`https://itunes.apple.com/search?media=music&entity=${track ? 'song' : 'album'}&limit=25&country=US&term=${enc(t)}`, 5000);
+    hit = arr(ap2 && ap2.results).find(x => looseEq(track ? x.trackName : x.collectionName, t) && (okA(x.artistName) || core(x.artistName).slice(0, 4) === core(a).slice(0, 4)));
+    if (hit && await imgOk(art600(hit.artworkUrl100))) return art600(hit.artworkUrl100);
+    // 4) MusicBrainz → Cover Art Archive (through our server)
+    const x = await catalogInfo(o);
+    if (x.cover && await imgOk(x.cover)) return x.cover;
+    return '';
+  }
+  const repairQ = new Map(); let repairing = false;
+  function scanCovers() {
+    $$('.art[data-ck]').forEach(a => {
+      if (a.classList.contains('pending')) return;
+      const n = a.nextElementSibling; if (n && n.classList.contains('art-img')) return;
+      const k = a.dataset.ck, c = coverMap[k];
+      if (c && (c.u || Date.now() - c.t < 3 * 86400000)) { if (c.u) a.insertAdjacentHTML('afterend', coverImg(c.u)); return; }
+      if (!repairQ.has(k)) repairQ.set(k, { type: a.dataset.y, artist: a.dataset.a, title: a.dataset.t });
+    });
+    pumpCovers();
+  }
+  async function pumpCovers() {
+    if (repairing) return; repairing = true;
+    try {
+      while (repairQ.size) {
+        const [k, o] = repairQ.entries().next().value;
+        let u = ''; try { u = await findCover(o); } catch (e) { u = ''; }
+        repairQ.delete(k);
+        coverMap[k] = { u, t: Date.now() }; saveCovers();
+        if (u) applyCover(k, o, u);
+        await new Promise(r => setTimeout(r, 350));
+      }
+    } finally { repairing = false; }
+  }
+  function applyCover(k, o, u) {
+    $$('.art[data-ck]').forEach(a => {
+      if (a.dataset.ck !== k) return;
+      const n = a.nextElementSibling; if (n && n.classList.contains('art-img')) n.remove();
+      a.insertAdjacentHTML('afterend', coverImg(u));
+    });
+    // keep the found cover on the saved list too, so it travels with your library and posts
+    let touched = false;
+    const fix = it => { if (it && ck(it) === k && (!it.cover || badCover.has(it.cover))) { it.cover = u; touched = true; } };
+    state.items.forEach(fix); state.results.recs.forEach(fix);
+    if (touched) { save(); if (!state.isExample) scheduleLibSync(); }
+  }
+  window.__jbCoverFail = img => {
+    const a = img.previousElementSibling, src = img.getAttribute('src');
+    img.remove();
+    if (src && !/^data:/.test(src)) { badCover.add(src); }
+    if (!a || !a.dataset.ck) return;
+    const c = coverMap[a.dataset.ck]; if (c && c.u === src) delete coverMap[a.dataset.ck];
+    saveCovers(); scheduleScan();
+  };
+  let scanT = 0;
+  const scheduleScan = () => { clearTimeout(scanT); scanT = setTimeout(scanCovers, 500); };
+  new MutationObserver(muts => { if (muts.some(m => m.addedNodes.length)) scheduleScan(); }).observe(document.body, { childList: true, subtree: true });
+
   /* ---------------- save the receipt as an image ---------------- */
   $$('.print-bar').forEach(b => { b.hidden = false; });
+  const PARTS = ['list', 'profile', 'recs'];
+  if (!Array.isArray(O.printParts)) O.printParts = PARTS.slice();
+  const partReady = { list: () => state.items.length > 0, profile: () => !!state.results.profile, recs: () => state.results.recs.length > 0 };
+  function paintParts() {
+    $$('#print-parts [data-part]').forEach(b => {
+      const k = b.dataset.part, ok = partReady[k]();
+      b.setAttribute('aria-disabled', String(!ok));
+      b.setAttribute('aria-pressed', String(ok && O.printParts.includes(k)));
+    });
+  }
+  const PART_LBL = { list: '담은 음악', profile: '취향 분석', recs: '추천 음악' };
+  // [영수증 출력] on the music receipt opens a small slip: pick the parts, then print
+  function openPrintDlg() {
+    openModal(`<section class="print-dlg" aria-labelledby="print-dlg-t">
+      <p class="x2 b c" id="print-dlg-t">PRINT</p>
+      <p class="c">출력할 부분을 고르세요. 여러 개를 함께 고를 수 있습니다.</p>
+      <p class="hr" aria-hidden="true"></p>
+      <div class="print-parts" id="print-parts" role="group" aria-label="출력할 부분">${PARTS.map(k => `<button type="button" class="chip-toggle" data-part="${k}" aria-pressed="false">${PART_LBL[k]}</button>`).join('')}</div>
+      <p class="hr" aria-hidden="true"></p>
+      <div class="print-go"><button class="btn" type="button" data-print-go>영수증 출력</button><button class="btn" type="button" data-print-cancel>취소</button></div>
+    </section>`, { kind: 'print' });
+    paintParts();
+  }
+  document.addEventListener('click', e => {
+    const b = e.target.closest('#print-parts [data-part]');
+    if (b) {
+      const k = b.dataset.part;
+      if (!partReady[k]()) { toast(k === 'list' ? '담은 음악이 없습니다' : '먼저 ANALYZE & RECOMMEND로 결과를 받아 주세요'); return; }
+      O.printParts = O.printParts.includes(k) ? O.printParts.filter(x => x !== k) : [...O.printParts, k];
+      paintParts(); save(); return;
+    }
+    if (e.target.closest('[data-print-cancel]')) { closeModal(); return; }
+    if (e.target.closest('[data-print-go]')) {
+      if (!PARTS.some(k => O.printParts.includes(k) && partReady[k]())) { toast('출력할 부분을 하나 이상 골라 주세요'); return; }
+      closeModal(); printReceipt('jpg', true);
+    }
+  });
   let printing = false;
-  async function printReceipt(kind) {
+  async function printReceipt(kind, chosen) {
     if (printing) return;
-    const el = document.body.dataset.view === 'community' ? $('#view-community') : $('#view-music');
+    const comm = document.body.dataset.view === 'community', el = comm ? $('#view-community') : $('#view-music');
+    if (!comm && !chosen) { openPrintDlg(); return; }
+    let parts = null;
+    if (!comm) {
+      parts = PARTS.filter(k => O.printParts.includes(k) && partReady[k]());
+      if (!parts.length) { toast('출력할 부분을 하나 이상 골라 주세요'); return; }
+    }
     printing = true; hideAc(); el.classList.add('printing'); toast('영수증을 출력하고 있습니다…');
     try {
       if (document.fonts && document.fonts.ready) await document.fonts.ready;
-      const blob = await receiptImage(el, kind);
+      const blob = await receiptImage(el, kind, parts);
       const stamp = STAMP.replace(/\D/g, '').slice(0, 12);
       const url = URL.createObjectURL(blob), a = document.createElement('a');
-      a.href = url; a.download = `jukebox-${el.id === 'view-community' ? 'community' : 'receipt'}-${stamp.slice(0, 8)}-${stamp.slice(8)}.${kind}`;
+      a.href = url; a.download = `jukebox-${comm ? 'community' : 'receipt'}-${stamp.slice(0, 8)}-${stamp.slice(8)}.${kind}`;
       document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000);
       toast('영수증 이미지를 저장했습니다');
     } catch (e) { toast('이미지로 출력하지 못했습니다'); }
     finally { printing = false; el.classList.remove('printing'); }
+  }
+  // keep only the chosen parts, and drop every control that isn't a printed line
+  function prunePrint(rc, parts) {
+    const rm = sel => rc.querySelectorAll(sel).forEach(n => n.remove());
+    rm('.headline,.desc,#music-entry,.kv.stack,#music-preset-desc,#music-settings,#music-go,#music-example,#music-status,.more-bar,.sec-tools,.fb,.mi .x,.results>.empty,#share-row,.counter .meter,.counter .hint,.counter .r');
+    rc.querySelectorAll('.counter .ln').forEach((ln, i) => { if (i > 0) ln.remove(); });
+    if (!parts.includes('list')) rm(':scope>.cols,#music-list,.counter');
+    if (!parts.includes('profile')) rm('.results>.profile');
+    if (!parts.includes('recs')) { rc.querySelectorAll('#music-recs').forEach(n => (n.closest('section') || n).remove()); rm('.results>.totals'); }
+    const res = rc.querySelector('.results'); if (res && !res.children.length) res.remove();
+    let prev = null;
+    [...rc.children].forEach(n => { const rule = n.matches('.hr,.hr2'); if (rule && (!prev || prev.matches('.hr,.hr2'))) n.remove(); else prev = n; });
   }
   document.addEventListener('click', e => { const b = e.target.closest('[data-print]'); if (b) printReceipt(b.dataset.print); });
   const toDataURL = blob => new Promise((res, rej) => { const f = new FileReader(); f.onload = () => res(f.result); f.onerror = rej; f.readAsDataURL(blob); });
@@ -161,17 +323,9 @@
     })().catch(e => { exportCssP = null; throw e; });
     return exportCssP;
   }
-  async function receiptImage(el, kind) {
-    const M = 44, cs = getComputedStyle(el), bs = getComputedStyle(document.body), w = el.offsetWidth, h = el.offsetHeight, W = w + 2 * M, H = h + 2 * M;
+  async function receiptImage(el, kind, parts) {
+    const M = 44, cs = getComputedStyle(el), bs = getComputedStyle(document.body), w = el.offsetWidth;
     const clone = el.cloneNode(true);
-    const oc = [...el.querySelectorAll('canvas')], cc = [...clone.querySelectorAll('canvas')];
-    oc.forEach((c, i) => {
-      const img = document.createElement('img'); img.className = c.className; img.setAttribute('style', c.getAttribute('style') || '');
-      img.style.width = c.offsetWidth + 'px'; img.style.height = c.offsetHeight + 'px';
-      try { img.src = c.toDataURL('image/png'); } catch (e) { /* skip */ }
-      cc[i].replaceWith(img);
-    });
-    await Promise.all([...clone.querySelectorAll('img.art-img')].map(async img => { try { img.src = await fetchData(img.src); img.removeAttribute('loading'); } catch (e) { img.remove(); } }));
     const oi = [...el.querySelectorAll('input,textarea,select')], ci = [...clone.querySelectorAll('input,textarea,select')];
     oi.forEach((o, i) => {
       const c = ci[i]; if (!c) return;
@@ -180,9 +334,33 @@
       else if (o.tagName === 'SELECT') [...c.options].forEach((op, k) => { if (k === o.selectedIndex) op.setAttribute('selected', ''); else op.removeAttribute('selected'); });
       else c.setAttribute('value', o.value);
     });
-    clone.querySelectorAll('.no-print,script,.ac').forEach(n => n.remove());
-    clone.removeAttribute('hidden');
+    clone.querySelectorAll('canvas').forEach(c => c.remove());
+    if (parts) prunePrint(clone, parts);
+    clone.querySelectorAll('.no-print,script,.ac,.outlinks').forEach(n => n.remove());
+    clone.removeAttribute('hidden'); clone.classList.remove('printing');
     clone.style.margin = '0'; clone.style.width = w + 'px'; clone.style.fontSize = cs.fontSize; clone.style.padding = cs.padding; clone.style.transform = 'none';
+    // lay the copy out off screen: measure it and give it its own crumpled paper
+    const host = document.createElement('div');
+    host.setAttribute('aria-hidden', 'true');
+    host.style.cssText = `position:absolute;left:-30000px;top:0;width:${w}px;visibility:hidden;pointer-events:none`;
+    el.parentNode.append(host); host.append(clone);
+    let h;
+    try {
+      await Promise.all([...clone.querySelectorAll('img.art-img')].map(async img => {
+        const src = img.getAttribute('src');
+        try { img.src = await fetchData(src); } catch (e) { try { img.src = await fetchData('/api/img?u=' + enc(src)); } catch (e2) { img.remove(); return; } }
+        img.removeAttribute('loading'); img.removeAttribute('onerror');
+      }));
+      h = clone.offsetHeight;
+      const P = window.__jbPaper && window.__jbPaper.paint(clone, (el.id === 'view-community' ? 23 : 11) + (parts ? parts.join('').length : 0));
+      if (P) [P.sh, P.cv].forEach(c => {
+        if (!c.width) return;
+        const img = document.createElement('img'); img.className = c.className;
+        img.setAttribute('style', c.getAttribute('style') || ''); if (!img.style.height) img.style.height = c.height + 'px';
+        try { img.src = c.toDataURL('image/png'); clone.append(img); } catch (e) { /* skip */ }
+      });
+    } finally { host.remove(); }
+    const W = w + 2 * M, H = h + 2 * M;
     const body = ['font-family', 'color', 'line-height', 'text-shadow', 'word-break', 'overflow-wrap', 'font-synthesis', '-webkit-font-smoothing'].map(p => `${p}:${bs.getPropertyValue(p)}`).join(';');
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}"><foreignObject x="0" y="0" width="${W}" height="${H}"><div xmlns="http://www.w3.org/1999/xhtml" style="position:relative;box-sizing:border-box;width:${W}px;height:${H}px;padding:${M}px;background:#fff;${body.replace(/"/g, "'")}"><style><![CDATA[${await exportCSS()}]]></style>${new XMLSerializer().serializeToString(clone)}<div style="position:absolute;inset:0;pointer-events:none;opacity:.14;background:var(--grain) 0 0/220px 220px"></div></div></foreignObject></svg>`;
     const img = new Image();
@@ -215,7 +393,7 @@
     el.addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; set(b.dataset.v); paint(); save(); });
     return paint;
   }
-  seg($('#music-type'), () => O.type, v => { O.type = v; acInput(); });
+  seg($('#music-type'), () => O.type, v => { O.type = v; });
   seg($('#music-format'), () => O.format, v => (O.format = v));
   seg($('#music-vocal'), () => O.vocal, v => (O.vocal = v));
   if (!['3', '5', '7'].includes(String(O.n))) O.n = '5';
@@ -298,11 +476,12 @@
         <button class="mi-cover" type="button" data-ref="my:${i}" aria-label="${esc(it.title)} 자세히 보기">${artHTML(it, it.pending ? 'pending' : '')}</button>
         <div class="mi-t">
           <div class="ln"><h4 title="${esc(it.title)}">${esc(it.title)}</h4><i class="lead"></i><span class="yr">${esc(it.year || '----')}</span></div>
-          <div class="ln sub"><span class="a">${esc(it.artist)}</span><span class="kind">${KIND_LBL[it.type] || 'Album'}</span></div>
-          <div class="ln sub"><span class="g">${esc(it.genre || '')}</span>${starsHTML(i, it.rating || 0)}</div>
+          <div class="ln sub"><span class="a">${esc(it.artist)}</span></div>
+          <div class="ln sub"><span class="g">${KIND_LBL[it.type] || 'Album'}${it.genre ? ' · ' + esc(it.genre) : ''}</span></div>
+          <div class="ln sub rate-ln">${starsHTML(i, it.rating || 0)}</div>
         </div>
         <button class="x" type="button" data-i="${i}" aria-label="${esc(it.title)} 삭제">×</button>
-      </li>`).join('') : `<li class="list-empty">아직 비어 있습니다. 위 입력칸에 아티스트나 제목을 적어 보세요.</li>`;
+      </li>`).join('') : `<li class="list-empty">아직 비어 있습니다. 위 SEARCH 칸에 두 글자만 적어 보세요.</li>`;
     const n = state.items.length;
     $('#music-count').textContent = n;
     $('#meta-music').innerHTML = `<span>CHK ${String(n).padStart(4, '0')}</span><span>${STAMP}</span>`;
@@ -310,6 +489,7 @@
     $('#music-need').textContent = n < MIN ? `${MIN - n}개가 더 필요합니다` : '분석할 수 있습니다';
     $('#music-example').hidden = !state.isExample;
     $('#music-go').disabled = n < MIN || busy;
+    paintParts();
   }
   $('#music-list').addEventListener('click', e => {
     const st = e.target.closest('.star');
@@ -332,7 +512,7 @@
     for (const it of items) {
       try {
         if (!it.cover) {
-          const hit = (await itunesSearch(`${it.artist} ${it.title}`, it.type, 5)).find(x => itemKey(x) === itemKey(it)) || null;
+          const hit = (await itunesSearch(`${it.artist} ${it.title}`, it.type, 8)).find(x => looseEq(x.artist, it.artist) && looseEq(x.title, it.title)) || null;
           if (hit) { it.cover = hit.cover; it.link = hit.link; if (!it.year) it.year = hit.year; if (!it.genre) it.genre = hit.genre; if (hit.album && it.type === 'track') it.album = hit.album; }
         }
         const x = await catalogInfo(it);
@@ -347,82 +527,302 @@
     save(); scheduleLibSync();
   }
 
-  /* ---------------- search (Apple Music catalogue) ---------------- */
-  const ac = { list: [], idx: -1, t: 0, seq: 0 };
-  function hideAc() { $('#music-ac').hidden = true; ac.idx = -1; }
-  function acInput() {
-    clearTimeout(ac.t);
-    const a = $('#music-artist').value.trim(), t = $('#music-title').value.trim();
-    if ((a + t).length < 2) { hideAc(); return; }
-    ac.t = setTimeout(() => acSearch(a, t), 450);
+  /* ---------------- search: type a couple of letters, tap to add (Apple Music + Deezer) ---------------- */
+  const S = { q: '', seq: 0, t: 0, view: '', rows: [], idx: -1, cache: new Map(), pool: new Map(), artists: new Map(), artistName: '', showSingles: false, chart: null, quick: null };
+  const qEl = $('#music-q'), acEl = $('#music-ac');
+  const inList = it => state.items.some(x => itemKey(x) === itemKey(it));
+  const isCJK = s => /[぀-ヿ㐀-鿿가-힣]/.test(s);
+  const words = s => fold(s).split(/[^a-z0-9぀-ヿ㐀-鿿가-힣]+/).filter(Boolean);
+  const JUNK = /karaoke|tribute|made famous|in the style of|cover version|lullaby|8-?bit|piano version|instrumental version/i;
+  function textScore(q, it) {
+    const toks = words(q); if (!toks.length) return 0;
+    const tw = words(it.title), aw = words(it.artist), tc = core(it.title), ac = core(it.artist), qc = core(q);
+    let s = 0;
+    for (const k of toks) {
+      if (tw.some(w => w.startsWith(k))) s += 3;
+      else if (aw.some(w => w.startsWith(k))) s += 2.5;
+      else if (tc.includes(k)) s += 1.5;
+      else if (ac.includes(k)) s += 1.2;
+      else if (it.album && core(it.album).includes(k)) s += .8;
+      else return -1;
+    }
+    if (qc && tc === qc) s += 4; else if (qc && tc.startsWith(qc)) s += 2.5;
+    if (qc && ac === qc) s += 2;
+    return s;
   }
-  async function acSearch(a, t) {
-    const seq = ++ac.seq, box = $('#music-ac');
-    box.hidden = false;
-    box.innerHTML = `<div class="ac-head"><span>“${esc([a, t].filter(Boolean).join(' · '))}” 검색 중</span><button class="btn btn-ghost btn-sm" type="button" data-ac-close>닫기</button></div><div class="ac-loading"><span class="dots">Apple Music 카탈로그에서 찾고 있습니다</span></div>`;
-    let list = await itunesSearch([a, t].filter(Boolean).join(' '), O.type, 10);
-    if (!list.length && a && t) list = await itunesSearch(t, O.type, 10);
-    if (seq !== ac.seq) return;
-    const na = a.toLowerCase().replace(/[^a-z0-9가-힣]/g, ''), nt = t.toLowerCase().replace(/[^a-z0-9가-힣]/g, '');
-    const score = x => { const xa = x.artist.toLowerCase().replace(/[^a-z0-9가-힣]/g, ''), xt = x.title.toLowerCase().replace(/[^a-z0-9가-힣]/g, ''); return (na && xa.includes(na) ? 2 : 0) + (nt && xt.includes(nt) ? 2 : 0) + (nt && xt === nt ? 1 : 0); };
-    list = list.sort((x, y) => score(y) - score(x)).slice(0, 6);
-    ac.list = list; ac.idx = -1;
-    box.innerHTML = `<div class="ac-head"><span>검색 결과 · 고르면 바로 목록에 담깁니다</span><button class="btn btn-ghost btn-sm" type="button" data-ac-close>닫기</button></div>` + (list.length ? list.map((x, i) =>
-      `<button type="button" class="ac-item" role="option" data-i="${i}"><span class="ac-cover">${artHTML(x)}</span><span class="ac-t"><b>${esc(x.title)}</b><span>${esc(x.artist)} · ${KIND_LBL[x.type]}${x.year ? ' · ' + esc(x.year) : ''}${x.genre ? ' · ' + esc(x.genre) : ''}</span></span><span class="ac-add">담기</span></button>`
-    ).join('') : `<div class="ac-empty">검색 결과가 없습니다. [추가]를 누르면 입력한 그대로 담깁니다.</div>`);
+  // one shape for every catalogue
+  const fromApple = x => {
+    const out = [];
+    if (x.wrapperType === 'track' && x.kind === 'song') {
+      out.push({ type: 'track', title: x.trackName, artist: x.artistName, album: String(x.collectionName || '').replace(/ - (Single|EP)$/, ''), year: String(x.releaseDate || '').slice(0, 4), genre: x.primaryGenreName || '', cover: art600(x.artworkUrl100), link: x.trackViewUrl || '' });
+    }
+    if (x.collectionName) {
+      const single = / - Single$/.test(x.collectionName) || x.trackCount && x.trackCount <= 3, ep = / - EP$/.test(x.collectionName);
+      out.push({ type: 'album', title: String(x.collectionName).replace(/ - (Single|EP)$/, ''), artist: x.collectionArtistName || x.artistName, year: String(x.releaseDate || '').slice(0, 4), genre: x.primaryGenreName || '', cover: art600(x.artworkUrl100), link: x.collectionViewUrl || '', single: !!single, ep, derived: x.wrapperType === 'track' });
+    }
+    return out;
+  };
+  const fromDzAlbum = x => ({ type: 'album', title: x.title, artist: x.artist && x.artist.name, cover: dzCover(x), year: String(x.release_date || '').slice(0, 4), single: x.record_type === 'single', ep: x.record_type === 'ep' });
+  const fromDzTrack = x => [{ type: 'track', title: x.title_short || x.title, artist: x.artist && x.artist.name, album: x.album && x.album.title || '', cover: dzCover(x.album) }, x.album ? { ...fromDzAlbum({ ...x.album, artist: x.artist }), derived: true } : null].filter(Boolean);
+  function remember(it) {
+    if (!it.title || !it.artist) return null;
+    const k = ck(it), old = S.pool.get(k);
+    if (old) { ['year', 'genre', 'cover', 'link', 'album'].forEach(f => { if (!old[f] && it[f]) old[f] = it[f]; }); if (!it.derived) old.derived = false; return old; }
+    S.pool.set(k, it); if (S.pool.size > 700) S.pool.delete(S.pool.keys().next().value);
+    return it;
   }
-  function acPick(i) {
-    const x = ac.list[i]; if (!x) return;
-    addItems([{ ...x }]);
-    $('#music-title').value = ''; $('#music-artist').value = ''; $('#music-artist').focus();
-    ac.list = []; hideAc();
+  function sources(q) {
+    let s = S.cache.get(q);
+    if (!s) {
+      s = {
+        apple: jsonp(`https://itunes.apple.com/search?media=music&entity=song&limit=30&country=KR&term=${enc(q)}`, 5000),
+        al: dz(`search/album?limit=12&q=${enc(q)}`),
+        tr: dz(`search/track?limit=15&q=${enc(q)}`),
+        ar: dz(`search/artist?limit=5&q=${enc(q)}`),
+      };
+      S.cache.set(q, s); if (S.cache.size > 80) S.cache.delete(S.cache.keys().next().value);
+    }
+    return s;
   }
-  function acKeys(e) {
-    const box = $('#music-ac');
-    if (box.hidden || !ac.list.length) { if (e.key === 'Escape') hideAc(); return; }
-    const items = $$('.ac-item', box);
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+  function merge(q, got) {
+    const rank = new Map(), bump = (it, r) => { const k = ck(it); rank.set(k, (rank.get(k) || 0) + r); };
+    const add = (list, w) => list.forEach((it, i, a) => { const m = remember(it); if (m) bump(m, w * (1 - i / Math.max(8, a.length))); });
+    if (got.apple) add(arr(got.apple.results).flatMap(fromApple), 2);
+    if (got.al) add(arr(got.al.data).map(fromDzAlbum), 1.6);
+    if (got.tr) add(arr(got.tr.data).flatMap(fromDzTrack), 1.2);
+    const artists = new Map();
+    const artistAdd = (name, w, dzId) => { if (!name) return; const k = core(name); if (!k) return; const a = artists.get(k) || { name, w: 0, dzId: 0 }; a.w += w; if (dzId) a.dzId = dzId; artists.set(k, a); };
+    if (got.ar) arr(got.ar.data).forEach((x, i) => artistAdd(x.name, 2 + Math.log10((x.nb_fan || 0) + 1) * .4 - i * .3, x.id));
+    return { rank, artists };
+  }
+  function results(q, m) {
+    const qc = core(q), scored = [];
+    S.pool.forEach((it, k) => {
+      const s = textScore(q, it); if (s < 0) return;
+      let v = s + (m && m.rank.get(k) || 0);
+      if (it.type === 'album' && (it.single || it.ep)) v -= it.single ? 1.6 : .6;
+      if (it.derived) v -= .8;
+      if (JUNK.test(it.title + ' ' + it.artist)) v -= 4;
+      scored.push([v, it]);
+    });
+    scored.sort((a, b) => b[0] - a[0]);
+    const albums = [], songs = [], seenA = new Set(), seenS = new Set();
+    for (const [, it] of scored) {
+      const sig = core(it.artist) + '|' + core(it.title);
+      if (it.type === 'album') { if (albums.length < 6 && !seenA.has(sig)) { seenA.add(sig); albums.push(it); } }
+      else if (songs.length < 5 && !seenS.has(sig)) { seenS.add(sig); songs.push(it); }
+    }
+    // artists: names that the query starts, weighted by how often they came back
+    const cand = new Map(m ? m.artists : []);
+    scored.slice(0, 40).forEach(([v, it]) => { const k = core(it.artist); const a = cand.get(k) || { name: it.artist, w: 0, dzId: 0 }; a.w += .25; cand.set(k, a); });
+    const arts = [...cand.entries()].map(([k, a]) => {
+      const ws = words(a.name), toks = words(q);
+      let s = toks.every(t => ws.some(w => w.startsWith(t)) || k.includes(t)) ? 2 : -9;
+      if (k === qc) s += 4; else if (k.startsWith(qc)) s += 2;
+      return { ...a, s: s + a.w };
+    }).filter(a => a.s >= 2.6).sort((x, y) => y.s - x.s).slice(0, 3);
+    arts.forEach(a => S.artists.set(core(a.name), a));
+    return { albums, songs, arts };
+  }
+
+  // drawing
+  const kindLbl = it => it.type === 'track' ? 'Song' : it.single ? 'Single' : it.ep ? 'EP' : 'Album';
+  function rowItem(it) {
+    const n = S.rows.push({ kind: 'item', it }) - 1;
+    return `<button type="button" class="ac-item" role="option" id="aco-${n}" data-n="${n}" aria-selected="${inList(it)}"><span class="ac-cover">${artHTML(it)}</span><span class="ac-t"><b>${esc(it.title)}</b><span>${esc(it.artist)} · ${kindLbl(it)}${it.year ? ' · ' + esc(it.year) : ''}${it.type === 'track' && it.album ? ' · ' + esc(it.album) : ''}</span></span><span class="ac-tk" aria-hidden="true"></span></button>`;
+  }
+  function rowArtist(a) {
+    const n = S.rows.push({ kind: 'artist', a }) - 1;
+    return `<button type="button" class="ac-art" role="option" id="aco-${n}" data-n="${n}"><span>${esc(a.name)}</span><span>앨범 전체 보기</span></button>`;
+  }
+  const head = (l, r = '') => `<div class="ac-h"><span>${l}</span>${r}</div>`;
+  const closeBtn = '<button type="button" class="ac-close" data-ac-close>닫기</button>';
+  const foot = '<p class="ac-rule" aria-hidden="true"></p><div class="ac-foot"><span>누르면 담기고, 다시 누르면 빠집니다</span><span>APPLE MUSIC · DEEZER</span></div>';
+  function paint(html) {
+    acEl.innerHTML = html; acEl.hidden = false; qEl.setAttribute('aria-expanded', 'true');
+    S.idx = -1; qEl.removeAttribute('aria-activedescendant');
+  }
+  function hideAc() {
+    if (!acEl) return;
+    acEl.hidden = true; S.view = ''; S.idx = -1; qEl.setAttribute('aria-expanded', 'false'); qEl.removeAttribute('aria-activedescendant');
+  }
+  function drawSearch(q, m, loading) {
+    S.rows = [];
+    const r = results(q, m);
+    let h = head(`“${esc(q)}”`, closeBtn) + '<p class="ac-rule" aria-hidden="true"></p>';
+    if (r.arts.length) h += head('ARTISTS') + r.arts.map(rowArtist).join('');
+    if (r.albums.length) h += head('ALBUMS') + r.albums.map(rowItem).join('');
+    if (r.songs.length) h += head('SONGS') + r.songs.map(rowItem).join('');
+    if (!r.arts.length && !r.albums.length && !r.songs.length) h += loading ? '<div class="ac-loading"><span class="dots">찾고 있습니다</span></div>' : '<div class="ac-empty">찾지 못했습니다. 철자를 바꾸거나 아래 [+] 직접 입력을 써 주세요.</div>';
+    else if (loading) h += '<div class="ac-loading"><span class="dots">더 찾고 있습니다</span></div>';
+    paint(h + foot);
+  }
+  async function runSearch(q) {
+    const seq = ++S.seq; S.view = 'search'; S.q = q;
+    drawSearch(q, null, true); // instant: what we already know
+    const s = sources(q), got = {};
+    let left = Object.keys(s).length;
+    await Promise.all(Object.entries(s).map(([k, p]) => p.then(d => {
+      got[k] = d; left--;
+      if (seq === S.seq && S.view === 'search') drawSearch(q, merge(q, got), left > 0);
+    })));
+  }
+  // one artist's albums and best-known songs
+  async function artistData(a) {
+    const key = core(a.name);
+    if (!a.p) a.p = (async () => {
+      const [al, so, dzA] = await Promise.all([
+        jsonp(`https://itunes.apple.com/search?media=music&entity=album&attribute=artistTerm&limit=80&country=KR&term=${enc(a.name)}`, 6000),
+        jsonp(`https://itunes.apple.com/search?media=music&entity=song&attribute=artistTerm&limit=25&country=KR&term=${enc(a.name)}`, 6000),
+        a.dzId ? Promise.all([dz(`artist/${a.dzId}/albums?limit=60`), dz(`artist/${a.dzId}/top?limit=10`)]) : Promise.resolve([null, null]),
+      ]);
+      const mine = it => core(it.artist) === key || looseEq(it.artist, a.name);
+      let albums = arr(al && al.results).flatMap(fromApple).filter(it => it.type === 'album' && mine(it)).map(remember).filter(Boolean);
+      let songs = arr(so && so.results).flatMap(fromApple).filter(it => it.type === 'track' && mine(it)).map(remember).filter(Boolean);
+      const [dAl, dTop] = dzA;
+      arr(dAl && dAl.data).map(x => fromDzAlbum({ ...x, artist: { name: a.name } })).map(remember).filter(Boolean).forEach(it => { if (!albums.some(x => core(x.title) === core(it.title))) albums.push(it); });
+      if (songs.length < 5) arr(dTop && dTop.data).flatMap(fromDzTrack).filter(it => it.type === 'track').map(remember).filter(Boolean).forEach(it => { if (!songs.some(x => core(x.title) === core(it.title))) songs.push(it); });
+      const seen = new Set(); albums = albums.filter(it => { const k = core(it.title); if (seen.has(k)) return false; seen.add(k); return true; });
+      const seenS = new Set(); songs = songs.filter(it => { const k = core(it.title); if (seenS.has(k)) return false; seenS.add(k); return true; }).slice(0, 8);
+      return { full: albums.filter(x => !x.single && !x.ep), small: albums.filter(x => x.single || x.ep), songs };
+    })();
+    return a.p;
+  }
+  async function openArtist(a) {
+    const seq = ++S.seq; S.view = 'artist'; S.artistName = a.name; S.showSingles = false;
+    S.rows = [];
+    paint(head(`<button type="button" class="ac-back" data-ac-back>‹ 뒤로</button>&nbsp;${esc(a.name.toUpperCase())}`, closeBtn) + '<p class="ac-rule" aria-hidden="true"></p><div class="ac-loading"><span class="dots">앨범을 모으고 있습니다</span></div>');
+    const d = await artistData(a);
+    if (seq !== S.seq) return;
+    drawArtist(a, d);
+  }
+  function drawArtist(a, d) {
+    S.rows = [];
+    let h = head(`<button type="button" class="ac-back" data-ac-back>‹ 뒤로</button>&nbsp;${esc(a.name.toUpperCase())}`, closeBtn) + '<p class="ac-rule" aria-hidden="true"></p>';
+    if (d.full.length) h += head('ALBUMS', `<span>${d.full.length}</span>`) + d.full.slice(0, 24).map(rowItem).join('');
+    if (d.small.length) h += head('SINGLES · EP', `<button type="button" class="ac-more" data-ac-singles>${S.showSingles ? '접기' : d.small.length + '개 보기'}</button>`) + (S.showSingles ? d.small.slice(0, 30).map(rowItem).join('') : '');
+    if (d.songs.length) h += head('TOP SONGS') + d.songs.map(rowItem).join('');
+    if (!d.full.length && !d.small.length && !d.songs.length) h += '<div class="ac-empty">이 아티스트의 작품을 불러오지 못했습니다. 잠시 뒤 다시 시도해 주세요.</div>';
+    const keep = acEl.scrollTop; paint(h + foot); acEl.scrollTop = keep;
+  }
+  // empty box: shortcuts that need no typing at all
+  async function chartAlbums() {
+    if (!S.chart) S.chart = api('charts').then(d => arr(d && d.albums).map(remember).filter(Boolean)).catch(() => { S.chart = null; return []; });
+    return S.chart;
+  }
+  async function openQuick() {
+    const seq = ++S.seq; S.view = 'quick';
+    const mine = [...new Set(state.isExample ? [] : state.items.slice().reverse().map(it => it.artist))].slice(0, 2);
+    const drawQ = (more, chart) => {
+      S.rows = [];
+      let h = head('QUICK ADD · 타자 없이 담기', closeBtn) + '<p class="ac-rule" aria-hidden="true"></p>';
+      more.forEach(({ a, list }) => { if (list.length) h += head(`${esc(a.toUpperCase())}의 다른 앨범`, `<button type="button" class="ac-more" data-ac-artist="${esc(a)}">전체</button>`) + list.map(rowItem).join(''); });
+      if (chart && chart.length) h += head('지금 많이 듣는 앨범 · KR') + chart.slice(0, 8).map(rowItem).join('');
+      if (!more.some(x => x.list.length) && !(chart && chart.length)) h += chart ? '<div class="ac-empty">두 글자만 입력해 보세요. 예: radio, 아이유</div>' : '<div class="ac-loading"><span class="dots">불러오는 중입니다</span></div>';
+      paint(h + foot);
+    };
+    let more = [], chart = null;
+    drawQ(more, chart);
+    const tasks = [chartAlbums().then(c => { chart = c; })];
+    mine.forEach(name => {
+      const a = S.artists.get(core(name)) || { name, w: 0, dzId: 0 }; S.artists.set(core(name), a);
+      tasks.push(artistData(a).then(d => { more.push({ a: name, list: d.full.filter(it => !inList(it)).slice(0, 3) }); }).catch(() => {}));
+    });
+    await Promise.all(tasks.map(t => t.then(() => { if (seq === S.seq && S.view === 'quick' && !qEl.value.trim()) drawQ(more.slice().sort((x, y) => mine.indexOf(x.a) - mine.indexOf(y.a)), chart); })));
+  }
+  function onQ() {
+    clearTimeout(S.t);
+    const q = qEl.value.trim();
+    $('#music-q-x').hidden = !qEl.value;
+    if (!q) { openQuick(); return; }
+    if (q.length < 2 && !isCJK(q)) { hideAc(); return; }
+    // what we already have answers at once; the catalogues fill in a moment later
+    S.seq++; S.view = 'search'; drawSearch(q, null, true);
+    S.t = setTimeout(() => runSearch(q), 220);
+  }
+  function toggleRow(n) {
+    const r = S.rows[n]; if (!r) return;
+    if (r.kind === 'artist') { openArtist(r.a); return; }
+    const it = r.it;
+    if (inList(it)) {
+      const i = state.items.findIndex(x => itemKey(x) === itemKey(it));
+      state.items.splice(i, 1); renderList(); save(); scheduleLibSync();
+      toast(`뺐습니다 · ${state.items.length}개`);
+    } else {
+      const { single, ep, derived, p, ...clean } = it;
+      if (addItems([{ ...clean }], { quiet: true })) toast(`담았습니다 · ${state.items.length}개${state.items.length < MIN ? ` (${MIN - state.items.length}개 더)` : ''}`);
+    }
+    $$(`#music-ac [data-n]`).forEach(b => { const x = S.rows[+b.dataset.n]; if (x && x.kind === 'item') b.setAttribute('aria-selected', String(inList(x.it))); });
+  }
+  function moveIdx(d) {
+    const btns = $$('#music-ac [data-n]'); if (!btns.length) return;
+    S.idx = (S.idx + d + btns.length) % btns.length;
+    btns.forEach((b, k) => b.classList.toggle('on', k === S.idx));
+    btns[S.idx].scrollIntoView({ block: 'nearest' });
+    qEl.setAttribute('aria-activedescendant', btns[S.idx].id);
+  }
+  qEl.addEventListener('input', onQ);
+  qEl.addEventListener('focus', () => { if (acEl.hidden) onQ(); });
+  qEl.addEventListener('keydown', e => {
+    if (e.isComposing) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); if (acEl.hidden) onQ(); else moveIdx(e.key === 'ArrowDown' ? 1 : -1); }
+    else if (e.key === 'Enter') {
       e.preventDefault();
-      ac.idx = (ac.idx + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
-      items.forEach((b, k) => b.classList.toggle('on', k === ac.idx));
-      items[ac.idx].scrollIntoView({ block: 'nearest' });
-    } else if (e.key === 'Enter' && ac.idx >= 0) { e.preventDefault(); acPick(ac.idx); }
-    else if (e.key === 'Escape') hideAc();
-  }
-  ['music-artist', 'music-title'].forEach(id => { $('#' + id).addEventListener('input', acInput); $('#' + id).addEventListener('keydown', acKeys); });
-  $('#music-ac').addEventListener('click', e => {
-    if (e.target.closest('[data-ac-close]')) { hideAc(); return; }
-    const b = e.target.closest('.ac-item'); if (b) acPick(+b.dataset.i);
+      const btns = $$('#music-ac [data-n]');
+      if (S.idx >= 0 && btns[S.idx]) toggleRow(+btns[S.idx].dataset.n);
+      else {
+        // Enter with nothing highlighted adds the top result (never removes)
+        const first = btns.find(b => b.classList.contains('ac-item'));
+        if (first && first.getAttribute('aria-selected') === 'true') toast('이미 담겨 있습니다');
+        else if (first) { toggleRow(+first.dataset.n); qEl.select(); }
+      }
+    } else if (e.key === 'Escape') { if (S.view === 'artist') { S.q ? runSearch(S.q) : openQuick(); } else hideAc(); }
   });
-  document.addEventListener('click', e => { if (!e.target.closest('#music-entry')) hideAc(); });
+  $('#music-q-x').addEventListener('click', () => { qEl.value = ''; qEl.focus(); onQ(); });
+  acEl.addEventListener('click', e => {
+    if (e.target.closest('[data-ac-close]')) { hideAc(); return; }
+    if (e.target.closest('[data-ac-back]')) { const q = qEl.value.trim(); q ? runSearch(q) : openQuick(); return; }
+    if (e.target.closest('[data-ac-singles]')) { S.showSingles = !S.showSingles; const a = S.artists.get(core(S.artistName)); if (a && a.p) a.p.then(d => drawArtist(a, d)); return; }
+    const ma = e.target.closest('[data-ac-artist]');
+    if (ma) { const name = ma.dataset.acArtist; openArtist(S.artists.get(core(name)) || { name, w: 0, dzId: 0 }); return; }
+    const b = e.target.closest('[data-n]'); if (b) toggleRow(+b.dataset.n);
+  });
+  // a tap keeps the list open; keep the phone keyboard down while picking
+  acEl.addEventListener('mousedown', e => { if (e.target.closest('button') && matchMedia('(pointer:fine)').matches) e.preventDefault(); });
+  document.addEventListener('click', e => { if (!e.target.closest('#music-entry') && !e.target.closest('#toast')) hideAc(); });
   $('#music-form').addEventListener('submit', e => {
     e.preventDefault();
     const artist = $('#music-artist').value.trim(), title = $('#music-title').value.trim();
-    if (!artist || !title) { (artist ? $('#music-title') : $('#music-artist')).focus(); toast('아티스트와 제목을 모두 적거나 검색 결과에서 골라 주세요'); return; }
+    if (!artist || !title) { (artist ? $('#music-title') : $('#music-artist')).focus(); toast('아티스트와 제목을 모두 적어 주세요'); return; }
     addItems([{ type: O.type, artist, title, pending: true }]);
-    $('#music-title').value = ''; $('#music-artist').value = ''; hideAc(); $('#music-artist').focus();
+    $('#music-title').value = ''; $('#music-artist').value = ''; $('#music-artist').focus();
   });
 
   /* ---------------- recommendations ---------------- */
   let busy = false, runCtl = null;
   const recKey = r => ((r.artist || '') + '|' + (r.title || '')).toLowerCase();
   const recLabel = r => `${r.artist} — ${r.title}`;
+  let runT0 = 0;
+  const elapsed = () => `· ${Math.max(0, Math.round((Date.now() - runT0) / 1000))}초`;
   function setStatus(msg, loading) {
     const st = $('#music-status'); if (!st) return;
-    st.innerHTML = `<span class="msg">${esc(msg)}</span>${loading ? '<span class="loadbar" aria-hidden="true"></span><button class="btn btn-ghost btn-sm" type="button" data-stop>멈추기</button>' : ''}`;
+    st.innerHTML = `<span class="msg">${esc(msg)}${loading ? ` <span class="el">${elapsed()}</span>` : ''}</span>${loading ? '<span class="loadbar" aria-hidden="true"></span><button class="btn btn-ghost btn-sm" type="button" data-stop>멈추기</button>' : ''}`;
   }
   function setBusy(b) {
     busy = b; document.body.dataset.busy = b ? '1' : '0';
     $('#music-go').disabled = b || state.items.length < MIN;
-    $('#music-go').textContent = b ? 'ANALYZING…' : 'ANALYZE & RECOMMEND';
+    $('#music-go .bar-lbl').textContent = b ? 'ANALYZING…' : 'ANALYZE & RECOMMEND';
   }
+  // each service's own site icon (its favicon) stands for the link; a text mark shows if the icon can't load
+  const SITES = [
+    ['Apple Music', 'music.apple.com', 'AM', (q, r) => (/^https:\/\/(music|itunes)\.apple\.com\//.test(r.link || '') ? r.link : `https://music.apple.com/search?term=${enc(q)}`)],
+    ['Spotify', 'open.spotify.com', 'SP', q => `https://open.spotify.com/search/${enc(q)}`],
+    ['YouTube Music', 'music.youtube.com', 'YT', q => `https://music.youtube.com/search?q=${enc(q)}`],
+    ['Rate Your Music', 'rateyourmusic.com', 'RYM', (q, r) => `https://rateyourmusic.com/search?searchterm=${enc(q)}&searchtype=${r.type === 'track' ? 'z' : 'l'}`],
+  ];
   const links = r => {
     const q = `${r.artist} ${r.title}`;
-    return `<nav class="outlinks" aria-label="찾아 듣기">
-      <a href="https://music.apple.com/search?term=${enc(q)}" target="_blank" rel="noopener" title="Apple Music"><i class="mk" aria-hidden="true">AM</i>Apple Music</a>
-      <a href="https://open.spotify.com/search/${enc(q)}" target="_blank" rel="noopener" title="Spotify"><i class="mk" aria-hidden="true">SP</i>Spotify</a>
-      <a href="https://www.youtube.com/results?search_query=${enc(q)}" target="_blank" rel="noopener" title="YouTube"><i class="mk" aria-hidden="true">YT</i>YouTube</a>
-      <a href="https://rateyourmusic.com/search?searchterm=${enc(q)}&searchtype=${r.type === 'track' ? 'z' : 'l'}" target="_blank" rel="noopener" title="Rate Your Music"><i class="mk" aria-hidden="true">RYM</i>RYM</a></nav>`;
+    return `<nav class="outlinks" aria-label="찾아 듣기">${SITES.map(([name, host, mk, url]) => `<a href="${esc(url(q, r))}" target="_blank" rel="noopener" title="${name}에서 찾기" aria-label="${name}에서 찾기"><img class="site-ic" src="https://www.google.com/s2/favicons?domain=${host}&sz=64" alt="" width="64" height="64" loading="lazy" referrerpolicy="no-referrer" onerror="this.nextElementSibling.hidden=false;this.remove()"><i class="mk" aria-hidden="true" hidden>${mk}</i></a>`).join('')}</nav>`;
   };
   const isPicked = r => { const p = live.picks.find(x => auth && x.uname === auth.key); return !!(p && p.item && itemKey(p.item) === itemKey(r)); };
   function recCard(r, i, opt = {}) {
@@ -433,7 +833,7 @@
     const vu = r.match ? `<div class="vu" style="--v:${Math.max(50, Math.min(99, +r.match || 75))}" role="img" aria-label="match score ${esc(r.match)}"><span class="ndl"></span><b>${esc(r.match)}</b></div>` : '';
     el.innerHTML = `<button class="cover" type="button" ${opt.sample ? '' : `data-ref="rec:${i}"`} aria-label="${esc(r.title)} 자세히 보기">${artHTML(r)}${opt.sample ? '<span class="flags"><span class="sample-flag">예시</span></span>' : ''}</button>
       <div class="card-body">
-        <div class="titles"><div class="ln"><h4>${esc(r.title)}</h4><i class="lead"></i>${r.match ? `<b class="price" aria-label="match score ${esc(r.match)}">${esc(r.match)}</b>` : ''}</div><p class="l2">${esc(r.artist)}</p><p class="l3">${esc(r.year || '')} · ${KIND_LBL[r.type] || 'Album'}${r.country ? ' · ' + esc(r.country) : ''}</p></div>
+        <div class="titles"><div class="ln"><h4><span class="qt" aria-hidden="true">「</span>${esc(r.title)}<span class="qt" aria-hidden="true">」</span></h4><i class="lead"></i>${r.match ? `<b class="price" aria-label="match score ${esc(r.match)}">${esc(r.match)}</b>` : ''}</div><p class="l2">${esc(r.artist)}</p><p class="l3">${esc(r.year || '')} · ${KIND_LBL[r.type] || 'Album'}${r.country ? ' · ' + esc(r.country) : ''}</p></div>
         ${r.genre ? `<p class="genre">${esc(r.genre)}</p>` : ''}
         <p class="why">${esc(r.why)}</p>
         ${r.axis && (r.axis.axis || r.axis.detail) ? `<p class="axis"><b>${esc(r.axis.axis)}</b>${esc(r.axis.detail)}</p>` : ''}${extra}
@@ -450,6 +850,7 @@
   }
   function renderResults() {
     const R = state.results, root = $('#music-results');
+    paintParts();
     root.innerHTML = '<div class="status" id="music-status"></div>';
     if (!R.profile && !R.recs.length) {
       const el = document.createElement('div'); el.className = 'empty';
@@ -477,7 +878,7 @@
     const R = state.results.recs, fb = state.feedback;
     return {
       items: state.items.map(it => ({ type: it.type, artist: it.artist, title: it.title, year: it.year || '', rating: it.rating || 0 })),
-      opts: { n: O.n, format: O.format, vocal: O.vocal, sim: $('#music-sim').value, pop: $('#music-pop').value, eraFrom: $('#music-era-from').value, eraTo: $('#music-era-to').value, region: O.region, axes: O.axes, same: $('#music-same').checked, exclude: $('#music-exclude').value.trim(), note: $('#music-note').value.trim() },
+      opts: { n: O.n, format: O.format, vocal: O.vocal, sim: $('#music-sim').value, pop: $('#music-pop').value, eraFrom: $('#music-era-from').value, eraTo: $('#music-era-to').value, region: O.region, axes: O.axes, same: $('#music-same').checked, deep: $('#music-deep').checked, exclude: $('#music-exclude').value.trim(), note: $('#music-note').value.trim() },
       more: more ? { prev: R.map(recLabel), up: R.filter(r => fb[recKey(r)] === 'up').map(recLabel), down: R.filter(r => fb[recKey(r)] === 'down').map(recLabel) } : undefined,
     };
   }
@@ -488,8 +889,11 @@
     const before = state.results.recs.length;
     if (more) renderResults(); else { $('#music-results').innerHTML = '<div class="status" id="music-status"></div>'; }
     $('#music-results').scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
-    setStatus('목록을 분석하고 있습니다. 첫 추천은 보통 10~20초 뒤에 찍힙니다.', true);
+    runT0 = Date.now();
+    setStatus('목록을 분석하고 있습니다. 첫 추천은 보통 10초 안팎에 찍힙니다.', true);
     const ctl = runCtl = new AbortController();
+    const tick = setInterval(() => { const e = $('#music-status .el'); if (e) e.textContent = elapsed(); }, 1000);
+    let late = false; const guard = setTimeout(() => { late = true; ctl.abort(); }, 95000);
     const idx = new Map(); let got = 0, failed = null, done = null;
     const ensureSec = () => {
       if ($('#music-recs')) return;
@@ -530,7 +934,8 @@
         }
         if (buf.trim()) { try { onEvent(JSON.parse(buf)); } catch (e) { /* skip */ } }
       }
-    } catch (e) { failed = e && e.name === 'AbortError' ? { code: 'cancelled' } : { message: '서버와 연결이 끊겼습니다. 다시 시도해 주세요.' }; }
+    } catch (e) { failed = late ? { message: '추천 엔진의 응답이 너무 늦어 멈췄습니다. 잠시 뒤 다시 시도해 주세요.' } : e && e.name === 'AbortError' ? { code: 'cancelled' } : { message: '서버와 연결이 끊겼습니다. 다시 시도해 주세요.' }; }
+    clearInterval(tick); clearTimeout(guard);
     setBusy(false); save(); renderResults();
     if (failed && failed.code === 'cancelled') setStatus(got ? `멈췄습니다. ${got}개까지 받았습니다.` : '멈췄습니다.', false);
     else if (failed && !got) setStatus(failed.message || '추천을 받지 못했습니다. 다시 시도해 주세요.', false);
@@ -538,6 +943,11 @@
     else {
       setStatus((done && done.fixed > 0 ? `수록곡 확인에서 ${done.fixed}건을 바로잡았습니다. ` : '') + `${got}개를 추천했습니다. “취향 맞음”을 누르면 다음 추천에 반영되고${auth ? ' Community에도 공유됩니다.' : ', 로그인하면 Community에 공유됩니다.'}`, false);
       if (auth && $('#music-share').checked) postAnalysis(state.results.recs.slice(before), more ? null : state.results.profile);
+      else if (!auth && $('#music-share').checked) {
+        pendingShare = { recs: state.results.recs.slice(before), profile: more ? null : state.results.profile };
+        const st = $('#music-status');
+        st.innerHTML = `<span class="msg">${esc(st.textContent.replace(/\s*“취향 맞음”.*$/, ''))} 아직 Join하지 않아 Community에는 올라가지 않았습니다.</span><button class="btn" type="button" data-join-share>JOIN하고 공유하기</button>`;
+      }
     }
   }
   $('#music-go').addEventListener('click', () => run(false));
@@ -557,6 +967,7 @@
   }
   $('#music-results').addEventListener('click', async e => {
     if (e.target.closest('[data-stop]')) { runCtl && runCtl.abort(); return; }
+    if (e.target.closest('[data-join-share]')) { setSide(true); const n = $('#join-name'); if (n) { n.scrollIntoView({ block: 'center' }); n.focus(); } toast('왼쪽 Community 칸에서 Join하면 이번 결과가 바로 공유됩니다'); return; }
     if (e.target.closest('[data-more]')) { run(true); return; }
     const cp = e.target.closest('[data-copy]'); if (cp) { copyText(buildCopy(cp.dataset.copy === 'full')); return; }
     if (e.target.closest('[data-reset]')) { state.results = emptyRes(); state.feedback = {}; save(); renderResults(); return; }
@@ -568,7 +979,7 @@
     $$('button.up, button.down', box).forEach(x => x.setAttribute('aria-pressed', String(fb[key] === (x.classList.contains('up') ? 'up' : 'down'))));
     b.closest('.card').classList.toggle('disliked', fb[key] === 'down');
     save();
-    if (fb[key] === 'up' && r) postFound(r);
+    if (fb[key] === 'up' && r) { if (auth) postFound(r); else if (!toldFound) { toldFound = true; toast('Join하면 “취향 맞음” 표시한 음악이 Community에 공유됩니다'); } }
   });
 
   /* ---------------- community data (server) ---------------- */
@@ -602,11 +1013,14 @@
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refresh(); });
 
   // account
+  let pendingShare = null, toldFound = false;
   async function join(username, pin) {
     const d = await api('login', { method: 'POST', body: { nickname: username, pin } });
     auth = { token: d.token, key: d.user.key, username: d.user.nickname, admin: d.user.admin }; saveAuth();
     toast(d.created ? `${auth.username}님, 환영합니다. 새 계정을 만들었습니다` : `${auth.username}님, 다시 오신 것을 환영합니다`);
-    await pullLib(); await refresh(); renderResults();
+    await pullLib();
+    if (pendingShare && pendingShare.recs.length) { const ps = pendingShare; pendingShare = null; await postAnalysis(ps.recs, ps.profile); toast('방금 받은 추천 결과를 Community에 공유했습니다'); }
+    await refresh(); renderResults();
   }
   function renderAcct() {
     const box = $('#acct');

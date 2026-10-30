@@ -139,6 +139,15 @@
     install(document.getElementById('side'), 37, { scroller: true });
     install(document.querySelector('.modal-card'), 51, { scroller: true });
   };
+  // a fresh crumple for a detached copy of a sheet (used when a receipt is saved as an image)
+  window.__jbPaper = {
+    paint(el, seed) {
+      const s = { el, seed, scroller: false, torn: true, w: 0, h: 0 };
+      s.cv = document.createElement('canvas'); s.cv.className = 'sheet-shade';
+      s.sh = document.createElement('canvas'); s.sh.className = 'sheet-shadow';
+      render(s); return s;
+    },
+  };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else start();
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => sheets.forEach(schedule));
 })();

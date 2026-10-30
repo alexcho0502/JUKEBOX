@@ -56,18 +56,22 @@
       <p class="meta-ln" id="meta-music"></p>
       <p class="hr" aria-hidden="true"></p>
       <h2 class="headline">SELECT AT LEAST <em>5</em> ALBUMS OR SONGS</h2>
-      <p class="c">아티스트나 제목을 입력하고, 검색된 앨범을 고르면 바로 담깁니다.</p>
+      <p class="c desc">두 글자만 쳐도 아티스트·앨범·곡이 바로 뜹니다.<br>누르면 담기고, 한 번 더 누르면 빠집니다.</p>
       <p class="hr" aria-hidden="true"></p>
       <div class="entry" id="music-entry">
+        <div class="kv search-kv"><label class="k" for="music-q">SEARCH</label><div class="q-wrap"><input type="search" id="music-q" placeholder="예: radio, 아이유, in rain" autocomplete="off" spellcheck="false" enterkeyhint="search" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="music-ac"><button class="q-x" type="button" id="music-q-x" aria-label="검색어 지우기" hidden>×</button></div></div>
+        <div class="ac" id="music-ac" role="listbox" aria-label="검색 결과" hidden></div>
+        <details class="manual" id="music-manual">
+        <summary>검색에 없으면 직접 입력</summary>
         <form id="music-form" class="entry-row" autocomplete="off">
           <div class="kv"><span class="k">TYPE</span>
             <div class="seg" id="music-type" role="group" aria-label="형식"><button type="button" data-v="album" aria-pressed="true">ALBUM</button><button type="button" data-v="track" aria-pressed="false">SONG</button></div>
           </div>
-          <div class="kv"><label class="k" for="music-artist">ARTIST</label><input type="text" id="music-artist" placeholder="예: D'Angelo" aria-autocomplete="list" aria-controls="music-ac"></div>
-          <div class="kv"><label class="k" for="music-title">TITLE</label><input type="text" id="music-title" placeholder="예: Black Messiah" aria-autocomplete="list" aria-controls="music-ac"></div>
+          <div class="kv"><label class="k" for="music-artist">ARTIST</label><input type="text" id="music-artist" placeholder="예: D'Angelo"></div>
+          <div class="kv"><label class="k" for="music-title">TITLE</label><input type="text" id="music-title" placeholder="예: Black Messiah"></div>
           <div class="r"><button class="btn" type="submit">ADD 추가</button></div>
         </form>
-        <div class="ac" id="music-ac" role="listbox" hidden></div>
+        </details>
       </div>
       <p class="hr" aria-hidden="true"></p>
       <div class="cols"><span>NO ITEM</span><span>YEAR</span></div>
@@ -124,13 +128,11 @@
             <label class="check"><input type="checkbox" id="music-same">목록에 있는 아티스트의 다른 작품도 추천</label>
             <div class="kv"><label class="k" for="music-exclude">EXCLUDE</label><input type="text" id="music-exclude" placeholder="Coldplay, Muse"></div>
             <div class="kv"><label class="k" for="music-note">NOTE</label><input type="text" id="music-note" placeholder="겨울밤에 어울리는 것"></div>
-            <label class="check"><input type="checkbox" id="music-deep">깊게 분석 (1~2분이 걸릴 수 있습니다)</label>
+            <label class="check"><input type="checkbox" id="music-deep">깊게 분석 (더 꼼꼼하지만 30초~1분 걸립니다)</label>
           </div>
         </div></div>
       </details>
-      <p class="hr2" aria-hidden="true"></p>
-      <button class="btn btn-big" id="music-go" type="button">ANALYZE &amp; RECOMMEND</button>
-      <p class="hr2" aria-hidden="true"></p>
+      <button class="btn-bar" id="music-go" type="button" aria-label="ANALYZE &amp; RECOMMEND — 취향 분석하고 추천받기"><span class="bar-lbl">ANALYZE &amp; RECOMMEND</span></button>
       <div class="results" id="music-results" aria-live="polite"></div>
       <div class="rcpt-end">
         <p class="close-ln">CHECK CLOSED</p>
@@ -189,7 +191,7 @@
 </div>
 
 <footer class="foot">
-  <p>앨범 검색과 커버는 Apple Music, 발매 정보는 MusicBrainz, 추천 문장은 Google Gemini가 만듭니다. 추천 목록은 Gemini 무료 등급으로 처리되며 Google 서비스 개선에 쓰일 수 있습니다.</p>
+  <p>앨범 검색과 커버는 Apple Music·Deezer, 발매 정보는 MusicBrainz, 링크 아이콘은 각 서비스의 사이트 아이콘이며, 추천 문장은 Google Gemini가 만듭니다. 추천 목록은 Gemini 무료 등급으로 처리되며 Google 서비스 개선에 쓰일 수 있습니다.</p>
 </footer>
 
 <div class="modal" id="modal" hidden><div class="modal-card rc" role="dialog" aria-modal="true" aria-label="상세 정보"><button class="modal-x" type="button" id="modal-x" aria-label="닫기">X</button><div id="modal-body"></div></div></div>

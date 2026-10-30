@@ -423,3 +423,179 @@ details.settings[open]>summary .chev::before{content:"[-] CLOSE"}
 /* real covers on the website (palette art stays as the fallback underneath) */
 .art-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;background:transparent}
 .foot a{color:inherit}
+
+/* ---------- v3: barcode button ---------- */
+.btn-bar{position:relative;display:grid;place-items:center;width:100%;height:4.4em;margin:calc(var(--lh) * .7em) 0;padding:0;border:0;border-radius:0;cursor:pointer;color:var(--ink);font:inherit;
+  background:repeating-linear-gradient(90deg,var(--ink) 0 2px,transparent 2px 4px,var(--ink) 4px 5px,transparent 5px 7px,var(--ink) 7px 10px,transparent 10px 11px,var(--ink) 11px 12px,transparent 12px 15px,var(--ink) 15px 16px,transparent 16px 18px,var(--ink) 18px 21px,transparent 21px 22px,var(--ink) 22px 23px,transparent 23px 26px,var(--ink) 26px 28px,transparent 28px 29px,var(--ink) 29px 30px,transparent 30px 33px)}
+.btn-bar .bar-lbl{background:var(--paper);padding:.12em .55em .08em;font-size:1.5em;line-height:1.15;font-weight:700;letter-spacing:.04em;white-space:nowrap;max-width:94%;overflow:hidden;text-overflow:ellipsis}
+.btn-bar:hover .bar-lbl,.btn-bar:focus-visible .bar-lbl{background:var(--ink);color:var(--paper)}
+.btn-bar:focus-visible{outline:1.6px dashed var(--ink);outline-offset:3px}
+.btn-bar[disabled]{cursor:not-allowed;opacity:.38}
+.btn-bar[disabled]:hover .bar-lbl{background:var(--paper);color:var(--ink)}
+body[data-busy="1"] .btn-bar{opacity:.6}
+.rc>.btn-bar+*{margin-top:0}
+
+/* ---------- v3: search ---------- */
+.search-kv{grid-template-columns:5em minmax(0,1fr)}
+.q-wrap{position:relative;display:block;min-width:0}
+.q-wrap input[type=search]{padding-right:1.4em;-webkit-appearance:none;appearance:none}
+.q-wrap input[type=search]::-webkit-search-cancel-button{display:none}
+.q-x{position:absolute;right:0;bottom:.12em;border:0;background:none;padding:0 .2em;cursor:pointer;color:var(--ink)}
+.q-x[hidden]{display:none}
+.entry .ac{position:static;left:auto;right:auto;box-shadow:none;padding:0;margin-top:calc(var(--lh) * .35em);max-height:min(36em,64vh);overflow:auto;overscroll-behavior:contain;background:none;display:block}
+.entry .ac[hidden]{display:none}
+.ac-h{display:flex;justify-content:space-between;align-items:baseline;gap:1em;white-space:nowrap;overflow:hidden;margin-top:calc(var(--lh) * .35em)}
+.ac-h:first-child{margin-top:0}
+.ac-h>span:first-child{overflow:hidden;text-overflow:ellipsis;font-weight:700}
+.ac-h::before{content:none}
+.ac-rule{display:block;overflow:hidden;white-space:nowrap;height:calc(var(--lh) * 1em)}
+.ac-rule::before{content:var(--hy)}
+.ac-item{grid-template-columns:2.6em minmax(0,1fr) auto;color:var(--ink);font:inherit;padding:.12em 0}
+.ac-item:focus-visible{outline:1.6px dashed var(--ink);outline-offset:1px}
+.ac-tk{position:relative;white-space:pre;padding-right:.1em}
+.ac-tk::before{content:"[\00a0]"}
+.ac-item[aria-selected="true"] .ac-tk::after{content:"";position:absolute;left:.1em;top:-.06em;width:1.24em;height:1.24em;background:var(--tick) center/contain no-repeat;pointer-events:none;transform:rotate(-4deg)}
+.ac-item[aria-selected="true"]:nth-of-type(2n) .ac-tk::after{background-image:var(--tick2);transform:rotate(3deg)}
+.ac-item[aria-selected="true"] .ac-t b{text-decoration:none}
+.ac-art{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:0 1em;width:100%;border:0;background:none;padding:.08em 0;text-align:left;cursor:pointer;color:var(--ink);font:inherit;white-space:nowrap}
+.ac-art>span:first-child{overflow:hidden;text-overflow:ellipsis}
+.ac-art>span:last-child::before{content:"["}.ac-art>span:last-child::after{content:"]"}
+.ac-art:hover,.ac-art.on{background:rgba(30,30,29,.08)}
+.ac-back,.ac-more{border:0;background:none;padding:0;cursor:pointer;color:var(--ink);font:inherit;white-space:nowrap}
+.ac-back::before,.ac-more::before{content:"["}.ac-back::after,.ac-more::after{content:"]"}
+.ac-back:hover,.ac-more:hover,.ac-close:hover{background:var(--ink);color:var(--paper)}
+.ac-close{border:0;background:none;padding:0;cursor:pointer;color:var(--ink);font:inherit;white-space:nowrap;font-weight:400}
+.ac-close::before{content:"["}.ac-close::after{content:"]"}
+.ac-foot{display:flex;justify-content:space-between;gap:1em;white-space:nowrap;overflow:hidden;opacity:.92;margin-top:calc(var(--lh) * .3em)}
+.ac-foot span{overflow:hidden;text-overflow:ellipsis}
+details.manual{margin-top:calc(var(--lh) * .45em)}
+details.manual summary{list-style:none;cursor:pointer;display:inline-block}
+details.manual summary::-webkit-details-marker{display:none}
+details.manual summary::before{content:"[+]\00a0"}
+details.manual[open] summary::before{content:"[-]\00a0"}
+details.manual summary:hover{background:var(--ink);color:var(--paper)}
+details.manual>form{margin-top:calc(var(--lh) * .3em)}
+.entry>.search-kv,.entry>.manual>summary,.ac-h,.ac-t,.ac-art,.ac-foot,.ac-empty,.ac-loading{-webkit-mask-image:var(--streak);mask-image:var(--streak);-webkit-mask-size:640px 520px;mask-size:640px 520px}
+
+/* ---------- v3: print chooser ---------- */
+.print-pick{display:grid;justify-items:center;gap:calc(var(--lh) * .35em) 0}
+.print-pick>.kv{grid-template-columns:auto minmax(0,1fr);gap:0 1em;justify-self:stretch}
+.print-parts{display:flex;flex-wrap:wrap;gap:0 1em;min-width:0}
+.print-parts .chip-toggle[aria-disabled="true"]{opacity:.38;cursor:not-allowed}
+.print-parts .chip-toggle[aria-disabled="true"]:hover{background:none;color:var(--ink)}
+.print-parts .chip-toggle:nth-child(2n)[aria-pressed="true"]::after{background-image:var(--tick2);transform:rotate(3deg)}
+
+/* ---------- v3: bigger covers, larger titles and artists ---------- */
+.mi{grid-template-columns:1.5em calc(var(--lh) * 4.2em) minmax(0,1fr);gap:0 .6em}
+.mi-cover{width:calc(var(--lh) * 4.2em);height:calc(var(--lh) * 4.2em)}
+.mi-t h4{font-size:1.18em;font-weight:700}
+.mi-t .ln.sub .a{font-size:1.1em}
+.mi .x{top:calc(var(--lh) * 1.25em)}
+.card{--cv:calc(var(--lh) * 6em);grid-template-columns:1.5em var(--cv) minmax(0,1fr);gap:.3em .6em;padding-bottom:calc(var(--lh) * 1.1em)}
+.card>.cover{width:var(--cv);height:var(--cv);grid-row:1 / span 2}
+.card::before{grid-row:1}
+.card-body{display:contents}
+.card .titles{grid-column:3;grid-row:1;align-self:start}
+.card .genre{grid-column:3;grid-row:2;align-self:end}
+.card-body>:not(.titles):not(.genre){grid-column:1 / -1}
+.card .titles h4{font-size:1.25em;line-height:1.15}
+.card .titles .l2{font-size:1.12em;font-weight:700}
+.card .titles .ln{align-items:baseline}
+.card-body>:not(.card-foot){-webkit-mask-image:var(--streak);mask-image:var(--streak);-webkit-mask-size:640px 520px;mask-size:640px 520px}
+.card .titles .l2{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.ac-item{grid-template-columns:3.2em minmax(0,1fr) auto}
+.ac-cover{width:3.2em;height:3.2em}
+.ac-t b{font-size:1.08em}
+
+/* ---------- v3: listening links as each service's own icon ---------- */
+.outlinks{gap:.2em .9em;align-items:center;margin-top:.15em}
+.outlinks a{display:inline-grid;place-items:center;width:2.6em;height:2.6em;margin:-.3em 0;border-radius:0;text-decoration:none}
+.outlinks a:hover{background:rgba(30,30,29,.08);text-decoration:none}
+.outlinks a:focus-visible{outline:1.6px dashed var(--ink);outline-offset:1px}
+.site-ic{width:1.7em;height:1.7em;display:block;border-radius:.35em}
+.outlinks .mk[hidden]{display:none}
+.outlinks .mk{transform:none}
+.card-foot{display:grid;gap:.3em}
+
+/* ---------- v3: phones first ---------- */
+@media (max-width:720px){
+  .rc:not(.side){--fs:clamp(14px,calc((100vw - 32px) / 22.4),16.5px);padding:1.7em 1em 2em}
+  .mi{grid-template-columns:1.3em calc(var(--lh) * 4.2em) minmax(0,1fr);gap:0 .55em}
+  .card{grid-template-columns:1.3em var(--cv) minmax(0,1fr)}
+  .btn-bar{height:4.8em}
+  .btn-bar .bar-lbl{font-size:1.35em}
+  .entry .ac{max-height:none;overflow:visible}
+  .print-pick>.kv{grid-template-columns:minmax(0,1fr)}
+}
+@media (pointer:coarse){
+  /* thumbs, not cursors: every tap target at least ~40px tall without changing the printed look */
+  input[type=text],input[type=search],input[type=password],input[type=number],select,textarea{font-size:max(16px,1em)}
+  .seg button,.chip-toggle,.fb button,.btn,.linkish,.ac-close,.ac-back,.ac-more,details.manual summary,details.settings>summary,.mi .x,.q-x{padding-top:.5em;padding-bottom:.5em}
+  .seg button,.chip-toggle,.fb button{margin-top:-.3em;margin-bottom:-.3em}
+  .star{padding:.35em .12em;font-size:1.15em}
+  .ac-item{padding:.32em 0}
+  .ac-art{padding:.5em 0}
+  .fb{gap:.2em 1.2em}
+  .outlinks a{width:2.9em;height:2.9em}
+  .site-ic{width:1.9em;height:1.9em}
+  .btn-bar:hover .bar-lbl{background:var(--paper);color:var(--ink)}
+  .btn-bar:active .bar-lbl{background:var(--ink);color:var(--paper)}
+}
+.ac-h,.ac-rule,.ac-foot{flex-shrink:0;min-height:calc(var(--lh) * 1em)}
+.card .titles .ln>h4{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.card .titles .ln>.price{padding-left:.6em}
+/* print chooser: one line per part, like receipt lines */
+.print-pick>.kv{grid-template-columns:minmax(0,1fr);justify-self:stretch}
+.print-pick>.kv>.k{text-align:center}
+.print-parts{display:grid;grid-template-columns:repeat(3,auto);justify-content:space-between;gap:.2em 1em}
+button,a,summary,label{-webkit-tap-highlight-color:transparent}
+@media (max-width:720px){
+  .print-parts{grid-template-columns:minmax(0,1fr);justify-content:stretch;justify-items:start;padding-left:22%}
+  .kv.stack>#music-preset{display:grid;grid-template-columns:repeat(2,max-content);justify-content:space-between;gap:.25em 1em}
+  .kv.stack>.seg{flex-wrap:wrap;row-gap:.25em}
+}
+@media (hover:none){
+  .btn:hover,.linkish:hover,.seg button:hover,.rail-tabs button:hover,.chip-toggle:hover,.fb button:hover,.ac-close:hover,.ac-back:hover,.ac-more:hover,details.manual summary:hover,details.bulk summary:hover,.ticks span:hover,.tabs a:hover,.mi .x:hover{background:none;color:var(--ink)}
+  .btn:active,.linkish:active,.seg button:active,.chip-toggle:active,.fb button:active,.ac-close:active,.ac-back:active,.ac-more:active,details.manual summary:active,.mi .x:active{background:var(--ink);color:var(--paper)}
+  .ac-item:hover,.ac-art:hover{background:none}
+  .ac-item:active,.ac-art:active,.outlinks a:active{background:rgba(30,30,29,.1)}
+}
+.mi-t .ln.sub .g{text-transform:uppercase}
+.mi-t .rate-ln{justify-content:flex-start}
+.mi-t .rate-ln .rate{gap:.4em}
+@media (max-width:720px){
+  .kv.stack>#music-preset{justify-items:start}
+  .kv.stack>.seg{margin-top:.3em}
+}
+.print-pick>.kv>.k{margin-bottom:.45em}
+/* community: bigger covers too (the side rail keeps its compact size) */
+.main .pick{grid-template-columns:1.5em calc(var(--lh) * 4.2em) minmax(0,1fr);gap:0 .6em}
+.main .pick .pc{width:calc(var(--lh) * 4.2em);height:calc(var(--lh) * 4.2em)}
+.main .pick .strip b{font-size:1.15em}
+.main .tile{grid-template-columns:calc(var(--lh) * 3em) minmax(0,1fr);gap:0 .6em;padding-bottom:.4em}
+.main .tile .tc{width:calc(var(--lh) * 3em);height:calc(var(--lh) * 3em)}
+.main .tile b{font-weight:700;font-size:1.06em}
+
+/* ---------- v3.1 ---------- */
+/* print slip (popup) */
+.print-dlg{display:grid;grid-template-columns:minmax(0,1fr);padding-top:.6em}
+.print-dlg>*+*{margin-top:calc(var(--lh) * .35em)}
+.print-dlg .print-parts{display:grid;grid-template-columns:minmax(0,1fr);justify-items:start;justify-content:stretch;gap:calc(var(--lh) * .45em) 0;padding:0 0 0 26%}
+.print-dlg .print-parts .chip-toggle{font-size:1.1em}
+.print-go{display:flex;justify-content:center;gap:0 1.6em;padding-top:.3em}
+/* MODE: tighter */
+.kv.stack>#music-preset{gap:.25em 1.2em}
+@media (max-width:720px){
+  .kv.stack>#music-preset{display:grid;grid-template-columns:repeat(2,max-content);justify-content:start;justify-items:start;column-gap:2.4em}
+}
+/* recommendation text: clear title / artist / note separation */
+.card .titles{row-gap:.3em}
+.card .titles .ln>h4{line-height:1.3}
+.card .titles .qt{font-weight:400}
+.card .titles .l2{line-height:1.3}
+.card .titles .l3{line-height:1.3;opacity:.9}
+.card .why{line-height:1.5;margin-top:.55em}
+.card .axis,.card .start{line-height:1.45}
+.card .card-foot{margin-top:.35em}
+/* listening icons in the middle */
+.outlinks{justify-content:center}

@@ -10,7 +10,8 @@ Claude에서 확인한 영수증 디자인과 기능을 그대로 옮겼고, 비
 | 사이트 + 서버 기능 | Cloudflare Pages (+ Functions) | 무료 |
 | 회원·목록·소식·오늘의 추천·방명록 | Cloudflare D1 | 무료 |
 | 추천 문장 | Google Gemini API 무료 등급 | 무료 (결제 정보를 연결하지 않으면 청구되지 않음) |
-| 앨범 검색·커버·실제 수록곡 확인 | Apple iTunes Search API | 무료, 키 불필요 |
+| 앨범 검색·커버·실제 수록곡 확인 | Apple iTunes Search API + Deezer API | 무료, 키 불필요 |
+| 검색창의 '지금 많이 듣는 앨범' | Apple Music 차트 RSS | 무료, 키 불필요 |
 | 발매 연도·장르·국가, 수록곡 보조 확인 | MusicBrainz / Cover Art Archive | 무료, 키 불필요 |
 
 ---
@@ -41,7 +42,11 @@ Claude에서 확인한 영수증 디자인과 기능을 그대로 옮겼고, 비
 | `GEMINI_API_KEY` | Secret | 지금 쓰는 키 그대로 |
 | `PIN_PEPPER` | Secret | 지금 값 그대로 |
 | `ADMIN_USERS` | **Text, 새로 추가** | 관리자로 쓸 Username. 여러 명이면 쉼표로: `myname,friend` |
-| `GEMINI_MODEL` | Text (선택) | 기본값 `gemini-3.8-flash` |
+| `GEMINI_FAST_MODEL` | Text (선택) | 평소 추천에 쓰는 빠른 모델. 기본값 `gemini-3.6-flash` |
+| `GEMINI_MODEL` | Text (선택) | **깊게 분석**을 켰을 때 쓰는 모델. 기본값 `gemini-3.8-flash` |
+| `GEMINI_FALLBACKS` | Text (선택) | 예비 모델. 기본값 `gemini-3.5-flash-lite` |
+
+> 이전 버전에서 `GEMINI_MODEL`을 `gemini-3.8-flash`로 직접 넣어 두었다면 그대로 두어도 됩니다. 이제 이 값은 '깊게 분석'에만 쓰입니다.
 | `REC_DAILY_LIMIT` | Text (선택) | 한 사람(IP)이 하루에 받을 수 있는 추천 횟수, 기본값 `20` |
 
 `TMDB_API_KEY`는 영화 탭이 없어져 더 이상 쓰지 않으니 지워도 됩니다.
@@ -71,11 +76,20 @@ GitHub에 파일을 올리면 새 배포는 자동으로 시작됩니다.
 - Username + 숫자 4자리 코드로 입장합니다. 같은 Username으로 5번 틀리면 15분 잠김, 한 IP에서 1시간에 30번 넘게 시도하면 차단됩니다.
 - 코드는 원문이 아니라 `PIN_PEPPER`와 섞은 해시로만 저장합니다.
 
+## 추천 속도
+
+- 평소에는 빠른 모델(`gemini-3.6-flash`)이 먼저 답합니다. 보통 5~15초 안에 첫 추천이 찍힙니다.
+- 6초가 지나도 글자가 오지 않으면 예비 모델이 동시에 출발하고, 먼저 답한 쪽을 씁니다.
+- 중간에 14초 넘게 멈춘 응답은 기다리지 않고 버립니다. 화면에는 경과 시간이 초 단위로 표시됩니다.
+- 옵션의 **깊게 분석**을 켜면 `gemini-3.8-flash`가 먼저 답합니다. 더 꼼꼼하지만 30초~1분 걸립니다.
+
 ## 추천 정확도
 
 추천이 끝나면 서버가 앨범마다 Apple Music(없으면 MusicBrainz)에서 **실제 트랙리스트**를 받아,
 "먼저 들어볼 곡"이 그 앨범에 정말 있는지 확인합니다. 없으면 실제 트랙리스트 안에서 다시 고르고,
-곡 추천의 "수록 앨범"도 실제 카탈로그와 대조해 바로잡습니다. 커버도 이때 실제 이미지로 붙습니다.
+곡 추천의 "수록 앨범"도 실제 카탈로그와 대조해 바로잡습니다. Apple에 없는 앨범은 Deezer, 그다음 MusicBrainz에서 찾습니다. 커버도 이때 실제 이미지로 붙습니다.
+
+커버가 깨지거나 비어 있는 항목은 브라우저가 Deezer → Apple → Cover Art Archive 순서로 다시 찾아 채우고, 찾은 커버는 목록에 저장합니다.
 
 ## 글꼴 라이선스 — 꼭 읽어 주세요
 
