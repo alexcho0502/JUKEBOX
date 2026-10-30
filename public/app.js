@@ -638,7 +638,7 @@
     if (got.us) add(arr(got.us.results).flatMap(fromApple), 2);
     if (got.al) add(arr(got.al.data).map(fromDzAlbum), 1.6);
     if (got.tr) add(arr(got.tr.data).flatMap(fromDzTrack), 1.2);
-    if (got.srv) { add(arr(got.srv.apple).flatMap(fromApple), 1.8); add(arr(got.srv.deezer).map(fromDzAlbum), 1.4); }
+    if (got.srv) add(arr(got.srv.items).map(x => ({ ...x })), 1.7);   // MusicBrainz albums through our server
     const artists = new Map();
     const artistAdd = (name, w, dzId) => { if (!name) return; const k = core(name); if (!k) return; const a = artists.get(k) || { name, w: 0, dzId: 0 }; a.w += w; if (dzId) a.dzId = dzId; artists.set(k, a); };
     if (got.ar) arr(got.ar.data).forEach((x, i) => artistAdd(x.name, 2 + Math.log10((x.nb_fan || 0) + 1) * .4 - i * .3, x.id));
@@ -653,6 +653,7 @@
       if (it.derived) v -= .8;
       if (JUNK.test(it.title + ' ' + it.artist)) v -= 4;
       if (it.type === 'album' && COMPIL.test(it.title)) v -= 1.5;   // originals before compilations
+      if (it.kind && !['album', 'ep', 'single'].includes(it.kind)) v -= 1.5;   // live, compilations… after the albums
       scored.push([v, it]);
     });
     scored.sort((a, b) => b[0] - a[0]);
@@ -676,7 +677,8 @@
   }
 
   // drawing
-  const kindLbl = it => it.type === 'track' ? 'Song' : it.single ? 'Single' : it.ep ? 'EP' : 'Album';
+  const KIND_NAME = { live: 'Live', compilation: 'Compilation', soundtrack: 'Soundtrack', remix: 'Remix', mixtape: 'Mixtape', 'mixtape/street': 'Mixtape', 'dj-mix': 'DJ Mix', demo: 'Demo', spokenword: 'Spoken Word', interview: 'Interview', audiobook: 'Audiobook' };
+  const kindLbl = it => it.type === 'track' ? 'Song' : it.single ? 'Single' : it.ep ? 'EP' : (KIND_NAME[it.kind] || (it.kind && it.kind !== 'album' ? 'Other' : 'Album'));
   function rowItem(it) {
     const n = S.rows.push({ kind: 'item', it }) - 1;
     return `<button type="button" class="ac-item" role="option" id="aco-${n}" data-n="${n}" aria-selected="${inList(it)}"><span class="ac-cover">${artHTML(it)}</span><span class="ac-t"><b>${esc(it.title)}</b><span>${esc(it.artist)} · ${kindLbl(it)}${it.year ? ' · ' + esc(it.year) : ''}${it.type === 'track' && it.album ? ' · ' + esc(it.album) : ''}</span></span><span class="ac-tk" aria-hidden="true"></span></button>`;
@@ -687,7 +689,7 @@
   }
   const head = (l, r = '') => `<div class="ac-h"><span>${l}</span>${r}</div>`;
   const closeBtn = '<button type="button" class="ac-close" data-ac-close>닫기</button>';
-  const foot = '<p class="ac-rule" aria-hidden="true"></p><div class="ac-foot"><span>누르면 담기고, 다시 누르면 빠집니다</span><span>APPLE MUSIC · DEEZER</span></div>';
+  const foot = '<p class="ac-rule" aria-hidden="true"></p><div class="ac-foot"><span>누르면 담기고, 다시 누르면 빠집니다</span><span>APPLE MUSIC · MUSICBRAINZ</span></div>';
   function paint(html) {
     acEl.innerHTML = html; acEl.hidden = false; qEl.setAttribute('aria-expanded', 'true');
     S.idx = -1; qEl.removeAttribute('aria-activedescendant');
@@ -728,7 +730,7 @@
   async function artistData(a) {
     const key = core(a.name);
     if (!a.p) a.p = (async () => {
-      const srvP = api(`artist?name=${enc(a.name)}${a.dzId ? '&dz=' + a.dzId : ''}`).catch(() => null);
+      const srvP = api(`artist?name=${enc(a.name)}`).catch(() => null);
       const [al, alUS, so, dzA] = await Promise.all([
         jsonp(`https://itunes.apple.com/search?media=music&entity=album&attribute=artistTerm&limit=80&country=KR&term=${enc(a.name)}`, 6000),
         jsonp(`https://itunes.apple.com/search?media=music&entity=album&attribute=artistTerm&limit=100&country=US&term=${enc(a.name)}`, 6000),
@@ -738,6 +740,9 @@
       const mine = it => core(it.artist) === key || looseEq(it.artist, a.name);
       let albums = [...arr(al && al.results), ...arr(alUS && alUS.results)].flatMap(fromApple).filter(it => it.type === 'album' && mine(it)).map(remember).filter(Boolean);
       let songs = arr(so && so.results).flatMap(fromApple).filter(it => it.type === 'track' && mine(it)).map(remember).filter(Boolean);
+      const shape = (albums, songs) => ({ full: albums.filter(x => !x.single && !x.ep), small: albums.filter(x => x.single || x.ep), other: [], songs: songs.slice(0, 8) });
+      a.quick = shape(albums.slice(), songs.slice());          // Apple's part can be shown while MusicBrainz answers
+      if (a.onQuick) a.onQuick(a.quick);
       const srv = await srvP;
       arr(srv && srv.albums).map(remember).filter(Boolean).forEach(it => { if (!albums.some(x => core(x.title) === core(it.title))) albums.push(it); });
       arr(srv && srv.songs).map(remember).filter(Boolean).forEach(it => { if (!songs.some(x => core(x.title) === core(it.title))) songs.push(it); });
@@ -746,27 +751,39 @@
       if (songs.length < 5) arr(dTop && dTop.data).flatMap(fromDzTrack).filter(it => it.type === 'track').map(remember).filter(Boolean).forEach(it => { if (!songs.some(x => core(x.title) === core(it.title))) songs.push(it); });
       const seen = new Set(); albums = albums.filter(it => { const k = core(it.title); if (seen.has(k)) return false; seen.add(k); return true; });
       const seenS = new Set(); songs = songs.filter(it => { const k = core(it.title); if (seenS.has(k)) return false; seenS.add(k); return true; }).slice(0, 8);
-      return { full: albums.filter(x => !x.single && !x.ep), small: albums.filter(x => x.single || x.ep), songs };
+      const mb = arr(srv && srv.mb);
+      if (!mb.length) return { full: albums.filter(x => !x.single && !x.ep), small: albums.filter(x => x.single || x.ep), other: [], songs };
+      // RYM-style discography from MusicBrainz: studio albums in release order; Apple lends covers and links where titles match
+      const apple = new Map(albums.map(x => [core(x.title), x])), used = new Set();
+      const withApple = x => { const ap = apple.get(core(x.title)); if (ap) used.add(ap); return remember(ap ? { ...x, cover: ap.cover || x.cover, link: ap.link || '', genre: ap.genre || '' } : { ...x }); };
+      const full = mb.filter(x => x.kind === 'album').map(withApple).filter(Boolean);
+      const small = [...mb.filter(x => x.kind === 'ep' || x.kind === 'single').map(withApple), ...albums.filter(x => (x.single || x.ep) && !used.has(x))].filter(Boolean);
+      const other = [...mb.filter(x => !['album', 'ep', 'single'].includes(x.kind)).map(withApple), ...albums.filter(x => !x.single && !x.ep && !used.has(x))].filter(Boolean);
+      return { full, small, other, songs, rym: true };
     })();
     const p = a.p;
     p.then(d => { if (a.p === p && !d.full.length && !d.small.length && !d.songs.length) a.p = null; }, () => { if (a.p === p) a.p = null; });  // nothing came back: try again next time
     return p;
   }
   async function openArtist(a) {
-    const seq = ++S.seq; S.view = 'artist'; S.artistName = a.name; S.showSingles = false;
+    const seq = ++S.seq; S.view = 'artist'; S.artistName = a.name; S.showSingles = false; S.showOther = false;
     S.rows = [];
     paint(head(`<button type="button" class="ac-back" data-ac-back>‹ 뒤로</button>&nbsp;${esc(a.name.toUpperCase())}`, closeBtn) + '<p class="ac-rule" aria-hidden="true"></p><div class="ac-loading"><span class="dots">앨범을 모으고 있습니다</span></div>');
+    a.onQuick = q => { if (seq === S.seq && S.view === 'artist' && (q.full.length || q.small.length || q.songs.length)) drawArtist(a, { ...q, loading: true }); };
     const d = await artistData(a);
+    a.onQuick = null;
     if (seq !== S.seq) return;
     drawArtist(a, d);
   }
   function drawArtist(a, d) {
     S.rows = [];
     let h = head(`<button type="button" class="ac-back" data-ac-back>‹ 뒤로</button>&nbsp;${esc(a.name.toUpperCase())}`, closeBtn) + '<p class="ac-rule" aria-hidden="true"></p>';
-    if (d.full.length) h += head('ALBUMS', `<span>${d.full.length}</span>`) + d.full.slice(0, 24).map(rowItem).join('');
+    if (d.full.length) h += head(d.rym ? 'ALBUMS · 발매순' : 'ALBUMS', `<span>${d.full.length}</span>`) + d.full.slice(0, 40).map(rowItem).join('');
+    if (d.other && d.other.length) h += head('LIVE · COMPILATION · 기타', `<button type="button" class="ac-more" data-ac-other>${S.showOther ? '접기' : d.other.length + '개 보기'}</button>`) + (S.showOther ? d.other.slice(0, 40).map(rowItem).join('') : '');
     if (d.small.length) h += head('SINGLES · EP', `<button type="button" class="ac-more" data-ac-singles>${S.showSingles ? '접기' : d.small.length + '개 보기'}</button>`) + (S.showSingles ? d.small.slice(0, 30).map(rowItem).join('') : '');
     if (d.songs.length) h += head('TOP SONGS') + d.songs.map(rowItem).join('');
-    if (!d.full.length && !d.small.length && !d.songs.length) h += head('이 아티스트의 작품을 불러오지 못했습니다.', '<button type="button" class="ac-more" data-ac-retry>다시 시도</button>');
+    if (!d.full.length && !d.small.length && !d.songs.length && !(d.other && d.other.length)) h += head('이 아티스트의 작품을 불러오지 못했습니다.', '<button type="button" class="ac-more" data-ac-retry>다시 시도</button>');
+    if (d.loading) h += '<div class="ac-loading"><span class="dots">MusicBrainz에서 전체 디스코그래피를 받고 있습니다</span></div>';
     const keep = acEl.scrollTop; paint(h + foot); acEl.scrollTop = keep;
   }
   // empty box: shortcuts that need no typing at all
@@ -813,7 +830,7 @@
       state.items.splice(i, 1); renderList(); save(); scheduleLibSync();
       toast(`뺐습니다 · ${state.items.length}개`);
     } else {
-      const { single, ep, derived, p, ...clean } = it;
+      const { single, ep, derived, p, kind, mbid, ...clean } = it;
       if (addItems([{ ...clean }], { quiet: true })) toast(`담았습니다 · ${state.items.length}개${state.items.length < MIN ? ` (${MIN - state.items.length}개 더)` : ''}`);
     }
     $$(`#music-ac [data-n]`).forEach(b => { const x = S.rows[+b.dataset.n]; if (x && x.kind === 'item') b.setAttribute('aria-selected', String(inList(x.it))); });
@@ -846,6 +863,7 @@
   acEl.addEventListener('click', e => {
     if (e.target.closest('[data-ac-close]')) { hideAc(); return; }
     if (e.target.closest('[data-ac-back]')) { const q = qEl.value.trim(); q ? runSearch(q) : openQuick(); return; }
+    if (e.target.closest('[data-ac-other]')) { S.showOther = !S.showOther; const a = S.artists.get(core(S.artistName)); if (a && a.p) a.p.then(d => drawArtist(a, d)); return; }
     if (e.target.closest('[data-ac-singles]')) { S.showSingles = !S.showSingles; const a = S.artists.get(core(S.artistName)); if (a && a.p) a.p.then(d => drawArtist(a, d)); return; }
     if (e.target.closest('[data-ac-retry]')) { openArtist(S.artists.get(core(S.artistName)) || { name: S.artistName, w: 0, dzId: 0 }); return; }
     const ma = e.target.closest('[data-ac-artist]');
@@ -854,7 +872,8 @@
   });
   // a tap keeps the list open; keep the phone keyboard down while picking
   acEl.addEventListener('mousedown', e => { if (e.target.closest('button') && matchMedia('(pointer:fine)').matches) e.preventDefault(); });
-  document.addEventListener('click', e => { if (!e.target.closest('#music-entry') && !e.target.closest('#toast')) hideAc(); });
+  // (a tap that redrew the list leaves its target detached: that is still a tap inside the list)
+  document.addEventListener('click', e => { if (e.target.isConnected && !e.target.closest('#music-entry') && !e.target.closest('#toast')) hideAc(); });
   $('#music-form').addEventListener('submit', e => {
     e.preventDefault();
     const artist = $('#music-artist').value.trim(), title = $('#music-title').value.trim();

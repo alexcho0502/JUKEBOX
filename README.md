@@ -66,7 +66,10 @@ GitHub에 파일을 올리면 새 배포는 자동으로 시작됩니다.
 4. 같은 주소 끝에 `?up=1` 을 붙이면 서버에서 Apple·Deezer·MusicBrainz에 연결되는지 시험합니다.
    - `"catalogues":{"apple":200,"deezer":200,"musicbrainz":200}` 이면 정상입니다. 200이 아닌 곳은 그 서비스가 막힌 것입니다.
 
-검색·커버·아티스트 앨범은 브라우저에서 먼저 찾고, 안 되면 서버(`/api/search`, `/api/cover`, `/api/artist`)가 대신 찾습니다.
+검색은 브라우저가 Apple Music(한국·미국)을 직접 찾고, 서버는 MusicBrainz에서 앨범을 찾아 함께 보여 줍니다.
+[앨범 전체 보기]는 MusicBrainz의 분류(RYM의 Discography와 같은 Album / EP·Single / Live·Compilation)로 정규 앨범을 발매순으로 보여 주고,
+Apple에 같은 앨범이 있으면 그 커버와 링크를 붙입니다.
+(Cloudflare 서버에서는 Apple이 429, Deezer가 403으로 막히는 일이 있어 서버 쪽은 MusicBrainz를 씁니다. MusicBrainz는 1초에 한 번씩 요청하며, 사람이 기다리는 검색이 먼저 처리됩니다.)
 서버 결과는 Cloudflare가 기억해 두므로(커버 7일, 아티스트 1일, 검색 1시간) 같은 요청이 반복돼도 빠릅니다.
 
 ## Community 소식

@@ -259,7 +259,17 @@ const norm = t => String(t || '').toLowerCase().normalize('NFKD').replace(/[̀-�
   .replace(/\(.*?\)|\[.*?\]|\s-\s(single|ep)$|feat\..*$|-\s*(\d{4}\s*)?remaster.*$/g, '').replace(/^the\s+/, '').replace(/[^a-z0-9가-힣]+/g, '');
 const same = (a, b) => { const x = norm(a), y = norm(b); return !!x && !!y && (x === y || (x.length > 4 && y.length > 4 && (x.includes(y) || y.includes(x)))); };
 const art600 = u => okUrl(String(u || '').replace(/\/\d+x\d+bb\./, '/600x600bb.'), COVER_HOST);
-let mbChain = Promise.resolve();
+// MusicBrainz asks for about one request a second. Searches someone is waiting on go before background lookups (covers, info).
+const mbWait = { high: [], low: [] }; let mbLast = 0, mbTimer = 0;
+function mbTurn(high) {
+  return new Promise(res => { (high ? mbWait.high : mbWait.low).push(res); mbPump(); });
+}
+function mbPump() {
+  if (mbTimer) return;
+  const next = mbWait.high.shift() || mbWait.low.shift(); if (!next) return;
+  const wait = Math.max(0, mbLast + 1000 - now());
+  mbTimer = setTimeout(() => { mbTimer = 0; mbLast = now(); next(); mbPump(); }, wait);
+}
 // Deezer's search only covers the catalogue licensed where the request comes from. Cloudflare usually serves Korean
 // visitors from Seoul, where Deezer isn't open, so its search there returns unrelated albums — then we don't use it.
 let dzInfo = null, dzInfoAt = 0;
@@ -275,12 +285,10 @@ function deezerOpen() {
 let appleFails = 0, appleDownUntil = 0;
 async function getJson(url, headers = {}, ttl = 86400) {
   if (url.startsWith('https://api.deezer.com/search') && !(await deezerOpen()).open) return null;
-  if (url.startsWith('https://musicbrainz.org/')) {
-    const turn = mbChain.then(() => new Promise(r => setTimeout(r, 1050)));
-    mbChain = turn; await turn;
-  }
+  if (url.startsWith('https://musicbrainz.org/')) await mbTurn(headers['x-priority'] === 'high');
   try {
-    const r = await fetch(url, { headers: { accept: 'application/json', ...headers }, cf: { cacheTtl: ttl, cacheEverything: true }, signal: AbortSignal.timeout(8000) });
+    const { 'x-priority': _p, ...hdrs } = headers;
+    const r = await fetch(url, { headers: { accept: 'application/json', ...hdrs }, cf: { cacheTtl: ttl, cacheEverything: true }, signal: AbortSignal.timeout(8000) });
     return r.ok ? await r.json() : null;
   } catch { return null; }
 }
@@ -303,7 +311,7 @@ async function mbExists(type, artist, title) {
   const a = artist.replace(/"/g, ''), t = title.replace(/"/g, '');
   const ent = type === 'track' ? 'recording' : 'release-group';
   const q = type === 'track' ? `recording:"${t}" AND artist:"${a}"` : `releasegroup:"${t}" AND artist:"${a}"`;
-  const s = await getJson(`https://musicbrainz.org/ws/2/${ent}?fmt=json&limit=10&query=${encodeURIComponent(q)}`, { 'user-agent': UA }, 604800);
+  const s = await getJson(`https://musicbrainz.org/ws/2/${ent}?fmt=json&limit=10&query=${encodeURIComponent(q)}`, { 'user-agent': UA, 'x-priority': 'high' }, 604800);
   if (!s) return { mb: null };
   const list = arr(type === 'track' ? s.recordings : s['release-groups']);
   const hit = list.find(x => same(x.title, title) && arr(x['artist-credit']).some(c => same(c.name || (c.artist && c.artist.name), artist) || same(c.artist && c.artist.name, artist)));
@@ -359,39 +367,43 @@ async function coverLookup(req) {
     return { cover: '', partial: !tried.ok };
   });
 }
-// GET /api/artist?name=&dz= — one artist's albums and best-known songs (Apple US + KR, Deezer)
+// MusicBrainz release groups sort records the way RYM's discography does: Album / EP / Single, with Live, Compilation
+// and the like as secondary types. kind 'album' = a plain studio album (RYM "Album").
+const mbCredit = ac => arr(ac).map(c => (c.name || (c.artist && c.artist.name) || '') + (c.joinphrase || '')).join('').trim();
+const mbKind = rg => { const p = rg['primary-type'] || '', s = arr(rg['secondary-types']); if (p === 'Album') return s.length ? String(s[0]).toLowerCase() : 'album'; return p === 'EP' ? 'ep' : p === 'Single' ? 'single' : 'other'; };
+const fromMbRg = (rg, artist) => { const kind = mbKind(rg); return { type: 'album', title: clip(rg.title, 160), artist: clip(artist || mbCredit(rg['artist-credit']), 120), year: String(rg['first-release-date'] || '').slice(0, 4), cover: `https://coverartarchive.org/release-group/${rg.id}/front-250`, mbid: rg.id, kind, single: kind === 'single', ep: kind === 'ep' }; };
+const luceneWords = q => String(q).replace(/[+\-&|!(){}[\]^"~*?:\\/]/g, ' ').replace(/\s+/g, ' ').trim();
+
+// GET /api/artist?name= — one artist's discography: MusicBrainz (RYM-style, in release order) + Apple when reachable
 async function artistLookup(req) {
-  const p = new URL(req.url).searchParams, name = clip(p.get('name'), 120); let dz = int(p.get('dz'), 0, 1e12, 0);
-  if (!name) return json({ albums: [], songs: [] });
+  const p = new URL(req.url).searchParams, name = clip(p.get('name'), 120);
+  if (!name) return json({ mb: [], albums: [], songs: [] });
   return cached(req, 86400, async () => {
     const mine = a => same(a, name) || norm(a) === norm(name);
-    const [usA, krA, usS, dzS] = await Promise.all([
+    const [usA, usS, mbA] = await Promise.all([
       itunesRaw({ term: name, entity: 'album', attribute: 'artistTerm', limit: '100' }, 'US'),
-      itunesRaw({ term: name, entity: 'album', attribute: 'artistTerm', limit: '60' }, 'KR'),
       itunesRaw({ term: name, entity: 'song', attribute: 'artistTerm', limit: '25' }, 'US'),
-      dz ? Promise.resolve(null) : getJson(`https://api.deezer.com/search/artist?limit=5&q=${encodeURIComponent(name)}`),
+      getJson(`https://musicbrainz.org/ws/2/artist?fmt=json&limit=5&query=${encodeURIComponent(`artist:"${name.replace(/"/g, '')}"`)}`, { 'user-agent': UA, 'x-priority': 'high' }, 604800),
     ]);
-    if (!dz && dzS) { const h = arr(dzS.data).find(x => mine(x.name)); if (h) dz = h.id; }
-    const [dzA, dzT] = dz ? await Promise.all([getJson(`https://api.deezer.com/artist/${dz}/albums?limit=100`), getJson(`https://api.deezer.com/artist/${dz}/top?limit=10`)]) : [null, null];
-    const albums = [], seenA = new Set(), addA = o => { const k = norm(o.title); if (!k || seenA.has(k)) return; seenA.add(k); albums.push(o); };
-    [...arr(usA), ...arr(krA)].filter(x => mine(x.artistName)).forEach(x => addA({ type: 'album', title: String(x.collectionName || '').replace(/ - (Single|EP)$/, ''), artist: x.artistName, year: String(x.releaseDate || '').slice(0, 4), genre: x.primaryGenreName || '', cover: art600(x.artworkUrl100), link: okUrl(x.collectionViewUrl, LINK_HOST), single: / - Single$/.test(x.collectionName) || (x.trackCount || 9) <= 3, ep: / - EP$/.test(x.collectionName) }));
-    arr(dzA && dzA.data).forEach(x => addA({ type: 'album', title: x.title, artist: name, year: String(x.release_date || '').slice(0, 4), cover: okUrl(x.cover_xl || x.cover_big, COVER_HOST), single: x.record_type === 'single', ep: x.record_type === 'ep' }));
-    const songs = [], seenS = new Set(), addS = o => { const k = norm(o.title); if (!k || seenS.has(k) || songs.length >= 10) return; seenS.add(k); songs.push(o); };
-    arr(usS).filter(x => mine(x.artistName)).forEach(x => addS({ type: 'track', title: x.trackName, artist: x.artistName, album: String(x.collectionName || '').replace(/ - (Single|EP)$/, ''), year: String(x.releaseDate || '').slice(0, 4), genre: x.primaryGenreName || '', cover: art600(x.artworkUrl100), link: okUrl(x.trackViewUrl, LINK_HOST) }));
-    arr(dzT && dzT.data).forEach(x => addS({ type: 'track', title: x.title_short || x.title, artist: name, album: x.album && x.album.title || '', cover: okUrl(x.album && (x.album.cover_xl || x.album.cover_big), COVER_HOST) }));
-    return { albums, songs, partial: !usA && !krA && !dzA };
+    const ar = arr(mbA && mbA.artists).find(x => mine(x.name)) || arr(mbA && mbA.artists).find(x => (x.score || 0) >= 98);
+    const rgs = ar ? await getJson(`https://musicbrainz.org/ws/2/release-group?fmt=json&limit=100&artist=${ar.id}&type=album|ep`, { 'user-agent': UA, 'x-priority': 'high' }, 86400) : null;
+    const mb = arr(rgs && rgs['release-groups']).map(rg => fromMbRg(rg, ar.name)).filter(x => x.title)
+      .sort((x, y) => (x.year || '9999').localeCompare(y.year || '9999'));
+    const albums = [], seenA = new Set();
+    arr(usA).filter(x => mine(x.artistName)).forEach(x => { const o = { type: 'album', title: String(x.collectionName || '').replace(/ - (Single|EP)$/, ''), artist: x.artistName, year: String(x.releaseDate || '').slice(0, 4), genre: x.primaryGenreName || '', cover: art600(x.artworkUrl100), link: okUrl(x.collectionViewUrl, LINK_HOST), single: / - Single$/.test(x.collectionName) || (x.trackCount || 9) <= 3, ep: / - EP$/.test(x.collectionName) }; const k = norm(o.title); if (k && !seenA.has(k)) { seenA.add(k); albums.push(o); } });
+    const songs = [], seenS = new Set();
+    arr(usS).filter(x => mine(x.artistName)).forEach(x => { const k = norm(x.trackName); if (!k || seenS.has(k) || songs.length >= 10) return; seenS.add(k); songs.push({ type: 'track', title: x.trackName, artist: x.artistName, album: String(x.collectionName || '').replace(/ - (Single|EP)$/, ''), year: String(x.releaseDate || '').slice(0, 4), genre: x.primaryGenreName || '', cover: art600(x.artworkUrl100), link: okUrl(x.trackViewUrl, LINK_HOST) }); });
+    return { mb, albums, songs, partial: !mbA && !usA };
   });
 }
-// GET /api/search?q= — the same search through our server, for when the browser can't reach the catalogues
+// GET /api/search?q= — albums from MusicBrainz (reachable from our server; Apple and Deezer refuse it)
 async function searchLookup(req) {
-  const q = clip(new URL(req.url).searchParams.get('q'), 80);
-  if (q.length < 1) return json({ items: [] });
+  const q = luceneWords(clip(new URL(req.url).searchParams.get('q'), 80)).toLowerCase();   // lower case: AND/OR/NOT stay plain words
+  if (q.length < 2) return json({ items: [] });
   return cached(req, 3600, async () => {
-    const [usA, usS, dz] = await Promise.all([
-      itunesRaw({ term: q, entity: 'album', limit: '20' }, 'US'), itunesRaw({ term: q, entity: 'song', limit: '20' }, 'US'),
-      getJson(`https://api.deezer.com/search/album?limit=12&q=${encodeURIComponent(q)}`),
-    ]);
-    return { apple: [...arr(usA), ...arr(usS)], deezer: arr(dz && dz.data), partial: !usA && !usS && !dz };
+    const query = `(releasegroup:(${q}) OR artist:(${q})) AND (primarytype:album OR primarytype:ep)`;
+    const s = await getJson(`https://musicbrainz.org/ws/2/release-group?fmt=json&limit=25&query=${encodeURIComponent(query)}`, { 'user-agent': UA, 'x-priority': 'high' }, 86400);
+    return { items: arr(s && s['release-groups']).filter(rg => (rg.score || 0) >= 40).map(rg => fromMbRg(rg)).filter(x => x.title && x.artist), partial: !s };
   });
 }
 
