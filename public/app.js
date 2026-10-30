@@ -558,6 +558,7 @@
   const inList = it => state.items.some(x => itemKey(x) === itemKey(it));
   const isCJK = s => /[぀-ヿ㐀-鿿가-힣]/.test(s);
   const words = s => fold(s).split(/[^a-z0-9぀-ヿ㐀-鿿가-힣]+/).filter(Boolean);
+  const COMPIL = /\b(collection|greatest hits|best of|anthology|essentials?|the very best|gold|definitive|playlist|hits)\b/i;
   const JUNK = /karaoke|tribute|made famous|in the style of|cover version|lullaby|8-?bit|piano version|instrumental version/i;
   function textScore(q, it) {
     const toks = words(q); if (!toks.length) return 0;
@@ -604,6 +605,8 @@
         al: dz(`search/album?limit=12&q=${enc(q)}`),
         tr: dz(`search/track?limit=15&q=${enc(q)}`),
         ar: dz(`search/artist?limit=5&q=${enc(q)}`),
+        // our server asks Apple's US store (the fullest catalogue; the KR store lacks many older Western albums) and Deezer
+        srv: q.length >= 2 ? api('search?q=' + enc(q)).catch(() => null) : Promise.resolve(null),
       };
       S.cache.set(q, s); if (S.cache.size > 80) S.cache.delete(S.cache.keys().next().value);
     }
@@ -629,6 +632,7 @@
       if (it.type === 'album' && (it.single || it.ep)) v -= it.single ? 1.6 : .6;
       if (it.derived) v -= .8;
       if (JUNK.test(it.title + ' ' + it.artist)) v -= 4;
+      if (it.type === 'album' && COMPIL.test(it.title)) v -= 1.5;   // originals before compilations
       scored.push([v, it]);
     });
     scored.sort((a, b) => b[0] - a[0]);
@@ -692,13 +696,6 @@
       got[k] = d; left--;
       if (seq === S.seq && S.view === 'search') drawSearch(q, merge(q, got), left > 0);
     })));
-    // the browser couldn't reach the catalogues (or found nothing): ask through our server
-    const r = results(q, merge(q, got));
-    if (!r.albums.length && !r.songs.length && seq === S.seq) {
-      if (!S.srv.has(q)) S.srv.set(q, api('search?q=' + enc(q)).catch(() => null));
-      got.srv = await S.srv.get(q);
-      if (seq === S.seq && S.view === 'search') drawSearch(q, merge(q, got), false);
-    }
   }
   // one artist's albums and best-known songs
   async function artistData(a) {
@@ -1063,7 +1060,6 @@
     $$('button.up, button.down', box).forEach(x => x.setAttribute('aria-pressed', String(fb[key] === (x.classList.contains('up') ? 'up' : 'down'))));
     b.closest('.card').classList.toggle('disliked', fb[key] === 'down');
     save();
-    if (fb[key] === 'up' && r) { if (auth) postFound(r); else if (!toldFound) { toldFound = true; toast('Join하면 “취향 맞음” 표시한 음악이 Community에 공유됩니다'); } }
   });
 
   /* ---------------- community data (server) ---------------- */
@@ -1179,15 +1175,13 @@
     } catch (e) { /* offline */ }
   }
 
-  // posts: only "취향 및 추천" (after ANALYZE & RECOMMEND) and "찾은 음악" — adding to your list posts nothing
-  async function postFound(r) {
-    if (!canAct()) return;
-    try { await api('posts', { method: 'POST', body: { kind: 'found', items: [compact(r)], why: String(r.why || '').slice(0, 300) } }); toast('Community에 “찾은 음악”으로 공유했습니다'); refresh(); }
-    catch (e) { dbFail(e); }
-  }
+  // posts: after ANALYZE & RECOMMEND only — "취향 및 추천" and "담은 음악" (that day's list); adding to your list posts nothing
   async function postAnalysis(recs, profile) {
     if (!canAct() || !recs.length) return;
     try {
+      // 담은 음악: the list exactly as it was when ANALYZE & RECOMMEND ran (one set per day)
+      const mine = state.isExample ? [] : state.items;
+      if (mine.length >= MIN) await api('posts', { method: 'POST', body: { kind: 'list', items: mine.slice(0, 100).map(compact) } }).catch(() => {});
       await api('posts', { method: 'POST', body: { kind: 'analysis', profile: profile ? { summary: profile.summary, genres: arr(profile.genres).slice(0, 5), keywords: arr(profile.keywords).slice(0, 5) } : null, items: recs.slice(0, 16).map(r => ({ ...compact(r), match: r.match || 0, why: String(r.why || '').slice(0, 200) })) } });
       refresh();
     } catch (e) { dbFail(e); }
@@ -1218,7 +1212,7 @@
   const userRow = u => `<li><button class="pl" type="button" data-user="${esc(u.key)}">${avatar(u.username)}<span class="who"><b>${esc(u.username)}${live.admins.includes(u.key) ? ' <span class="badge">ADMIN</span>' : ''}</b><span>소식 ${postCount(u.key)} · ${timeAgo(u.last)}</span></span><span class="visits">방문 ${visitCount(u.key)}</span></button></li>`;
   function feedLine(f) {
     const it = arr(f.items)[0] || {};
-    const head = f.kind === 'analysis' ? `${esc(nameOf(f.uname))}님의 취향 및 추천` : `${esc(nameOf(f.uname))}님이 추천에서 찾은 음악`;
+    const head = f.kind === 'analysis' ? `${esc(nameOf(f.uname))}님의 취향 및 추천` : `${esc(nameOf(f.uname))}님이 담은 음악 · ${arr(f.items).length}개`;
     return `<li><button class="rf" type="button" data-ref="feed:${esc(f.id)}:0"><span class="rf-cover">${artHTML(it)}</span><span class="rf-t"><b>${head}</b><span>${esc(it.title || '')}${it.artist ? ' — ' + esc(it.artist) : ''} · ${timeAgo(f.createdAt)}</span></span></button></li>`;
   }
   function renderRail() {
@@ -1244,13 +1238,18 @@
       const p = f.profile;
       body = `${p && p.summary ? `<p class="summary">${esc(p.summary)}</p>` : ''}${p && arr(p.keywords).length ? `<ul class="chips">${arr(p.keywords).map(k => `<li class="tag">${esc(k)}</li>`).join('')}</ul>` : ''}
         <p class="hint">추천받은 음악 ${items.length}개</p><div class="tiles">${items.map((it, i) => tile(it, `feed:${f.id}:${i}`, it.match ? `<span class="pill match ms">${esc(it.match)}</span>` : '')).join('')}</div>`;
-    } else if (f.kind === 'found') {
-      what = '추천에서 마음에 드는 음악을 찾았습니다';
-      body = `<div class="tiles">${items.map((it, i) => tile(it, `feed:${f.id}:${i}`)).join('')}</div>${f.why ? `<p class="hint">“${esc(f.why)}”</p>` : ''}`;
+    } else if (f.kind === 'list') {
+      what = `${esc(nameOf(f.uname))}님이 담은 음악`;
+      const open = openLists.has(f.id);
+      body = `<div class="set-ln"><button class="date-box" type="button" data-listdate="${esc(f.id)}" aria-expanded="${open}">${ymd(f.createdAt)}</button><span>${items.length}개 · ANALYZE &amp; RECOMMEND 때의 목록</span></div>
+        ${open ? `<div class="tiles">${items.map((it, i) => tile(it, `feed:${f.id}:${i}`)).join('')}</div>`
+          : `<button class="set-strip" type="button" data-listdate="${esc(f.id)}" aria-label="${ymd(f.createdAt)}에 담은 음악 ${items.length}개 보기">${items.slice(0, 8).map(it => `<span class="ss">${artHTML(it)}</span>`).join('')}${items.length > 8 ? `<span class="ss-more">+${items.length - 8}</span>` : ''}</button>`}`;
     } else return '';
     return `<li class="post"><div class="post-top">${avatar(nameOf(f.uname), 'sm')}<button class="nick" type="button" data-user="${esc(f.uname)}">${esc(nameOf(f.uname))}</button><time>${timeAgo(f.createdAt)}</time></div><p class="act">* ${what}</p>${body}
       ${canDel ? `<div class="post-foot"><button class="btn btn-sm btn-danger" type="button" data-delpost="${esc(f.id)}">${mine ? '내 소식 삭제' : '관리자 삭제'}</button></div>` : ''}</li>`;
   }
+  const openLists = new Set();
+  const ymd = t => { const d = new Date(t); return `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')}`; };
   function renderCommunity() {
     const note = $('#comm-notice');
     if (!live.ready) { note.hidden = false; note.textContent = live.error ? '서버에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.' : '불러오고 있습니다…'; }
@@ -1273,7 +1272,7 @@
     else {
       const mine = allFeed().filter(f => f.uname === auth.key), shown = mine.slice(0, myShown);
       const pick = live.picks.find(p => p.uname === auth.key);
-      const lbl = f => f.kind === 'analysis' ? '취향 및 추천' : '찾은 음악';
+      const lbl = f => f.kind === 'analysis' ? '취향 및 추천' : `담은 음악 ${ymd(f.createdAt)}`;
       my.innerHTML = `<p class="hint">내 소식은 나만 지울 수 있습니다.</p>
         <ul class="mine-list">${pick ? `<li><span>오늘의 추천 · ${esc(pick.item.title)}</span><button class="btn btn-sm btn-danger" type="button" data-delpick="${esc(pick.id)}">내리기</button></li>` : ''}
         ${mine.length ? shown.map(f => `<li><span>${lbl(f)} · ${esc(arr(f.items).map(x => x.title).slice(0, 3).join(', '))} · ${timeAgo(f.createdAt)}</span><button class="btn btn-sm btn-danger" type="button" data-delpost="${esc(f.id)}">삭제</button></li>`).join('') : (pick ? '' : '<li><span>아직 올린 소식이 없습니다.</span></li>')}</ul>
@@ -1303,6 +1302,8 @@
     const dk = e.target.closest('[data-delpick]'); if (dk) { try { await api('picks', { method: 'DELETE' }); toast('오늘의 추천을 내렸습니다'); refresh(); } catch (er) { dbFail(er); } return; }
     const da = e.target.closest('[data-delall]'); if (da && auth) { if (armed(da, '한 번 더 누르면 모두 삭제')) { try { await api('posts', { method: 'DELETE' }); older.forEach((f, id) => { if (f.uname === auth.key) older.delete(id); }); toast('내 소식을 모두 삭제했습니다'); refresh(); } catch (er) { dbFail(er); } } return; }
     const du = e.target.closest('[data-deluser]'); if (du && isAdmin()) { if (armed(du, '정말 삭제')) adminDeleteUser(du.dataset.deluser); return; }
+    const ld = e.target.closest('[data-listdate]');
+    if (ld && !ld.closest('#modal')) { const id = ld.dataset.listdate; openLists.has(id) ? openLists.delete(id) : openLists.add(id); renderCommunity(); return; }
     const fm = e.target.closest('[data-feed-more]');
     if (fm) {
       const list = allFeed().filter(f => feedFilter === 'all' || f.kind === feedFilter);
@@ -1333,7 +1334,7 @@
     const [kind, a, b] = ref.split(':');
     if (kind === 'my') { const it = state.items[+a]; return it ? { item: it, by: auth ? auth.key : null } : null; }
     if (kind === 'rec') { const it = state.results.recs[+a]; return it ? { item: it } : null; }
-    if (kind === 'feed') { const f = allFeed().find(x => x.id === a); const it = f && arr(f.items)[+b]; return it ? { item: it, by: f.uname, at: f.createdAt, kind: f.kind } : null; }
+    if (kind === 'feed') { const f = allFeed().find(x => x.id === a) || (modalCtx && arr(modalCtx.lists).find(x => x.id === a)); const it = f && arr(f.items)[+b]; return it ? { item: it, by: f.uname, at: f.createdAt, kind: f.kind } : null; }
     if (kind === 'pick') { const p = live.picks.find(x => x.id === a); return p && p.item ? { item: p.item, by: p.uname, at: p.createdAt, kind: 'pick' } : null; }
     if (kind === 'lib') { const it = profLib[+a]; return it ? { item: it } : null; }
     if (kind === 'pa') { const f = modalCtx && arr(modalCtx.analyses).find(x => x.id === a); const it = f && arr(f.items)[+b]; return it ? { item: it, by: f.uname, at: f.createdAt, kind: 'analysis' } : null; }
@@ -1341,7 +1342,7 @@
   }
   function detailHTML(ctx) {
     const it = { ...ctx.item, ...(infoCache.get(itemKey(ctx.item)) || {}) };
-    const by = ctx.by && live.accounts.has(ctx.by) ? `<p class="hint">${esc(nameOf(ctx.by))}님이 ${ctx.kind === 'pick' ? '오늘의 추천으로 골랐습니다' : (ctx.kind === 'analysis' ? '추천받았습니다' : (ctx.kind === 'found' ? '추천에서 찾았습니다' : '담았습니다'))}${ctx.at ? ' · ' + timeAgo(ctx.at) : ''}</p>` : '';
+    const by = ctx.by && live.accounts.has(ctx.by) ? `<p class="hint">${esc(nameOf(ctx.by))}님이 ${ctx.kind === 'pick' ? '오늘의 추천으로 골랐습니다' : (ctx.kind === 'analysis' ? '추천받았습니다' : (ctx.kind === 'list' ? '담았습니다' : '담았습니다'))}${ctx.at ? ' · ' + timeAgo(ctx.at) : ''}</p>` : '';
     const inMine = state.items.some(x => itemKey(x) === itemKey(it));
     const loading = ctx.loading ? '<span class="dots">불러오는 중</span>' : '정보 없음';
     return `<div class="detail"><div class="dc">${artHTML(it)}</div><div style="display:grid;gap:14px;align-content:start;min-width:0">
@@ -1377,7 +1378,9 @@
   }
   $('#modal-body').addEventListener('click', e => {
     const t = e.target.closest('[data-ptab]');
-    if (t && modalCtx && modalCtx.kind === 'profile') { modalCtx.tab = t.dataset.ptab; renderProfileModal(); }
+    if (t && modalCtx && modalCtx.kind === 'profile') { modalCtx.tab = t.dataset.ptab; renderProfileModal(); return; }
+    const ps = e.target.closest('[data-pset]');
+    if (ps && modalCtx && modalCtx.kind === 'profile') { modalCtx.set = ps.dataset.pset; renderProfileModal(); }
   });
   $('#modal-body').addEventListener('click', async e => {
     if (!modalCtx) return;
@@ -1393,12 +1396,12 @@
   });
   async function openProfile(key) {
     setSide(false);
-    modalCtx = { kind: 'profile', key, lib: null, messages: [], analyses: null, tab: 'lib' };
+    modalCtx = { kind: 'profile', key, lib: null, messages: [], analyses: null, lists: [], tab: 'lib', set: 'now' };
     $('#modal').hidden = false; renderProfileModal(); $('#modal-x').focus();
     try {
       const d = await api('users/' + enc(key));
       if (!modalCtx || modalCtx.key !== key) return;
-      modalCtx.lib = arr(d.library); modalCtx.messages = arr(d.messages); modalCtx.analyses = arr(d.analyses);
+      modalCtx.lib = arr(d.library); modalCtx.messages = arr(d.messages); modalCtx.analyses = arr(d.analyses); modalCtx.lists = arr(d.lists);
       renderProfileModal();
       if (auth && auth.key !== key) refresh();
     } catch (e) { if (modalCtx && modalCtx.key === key) { modalCtx.lib = []; modalCtx.analyses = []; renderProfileModal(); } }
@@ -1415,7 +1418,13 @@
     const pick = live.picks.find(p => p.uname === key);
     let pane = '';
     if (loading) pane = '<p class="rail-empty">불러오고 있습니다…</p>';
-    else if (tab === 'lib') pane = profLib.length ? `<div class="tiles">${profLib.map((it, i) => tile(it, 'lib:' + i)).join('')}</div>` : '<p class="rail-empty">아직 담은 음악이 없습니다.</p>';
+    else if (tab === 'lib') {
+      const sets = arr(modalCtx.lists), cur = sets.find(f => f.id === modalCtx.set);
+      const boxes = `<div class="date-boxes"><button class="date-box" type="button" data-pset="now" aria-pressed="${!cur}">지금</button>${sets.map(f => `<button class="date-box" type="button" data-pset="${esc(f.id)}" aria-pressed="${cur === f}">${ymd(f.createdAt)}</button>`).join('')}</div>`;
+      const list = cur ? arr(cur.items) : profLib;
+      pane = boxes + (cur ? `<p class="hint">${ymd(cur.createdAt)}에 ANALYZE &amp; RECOMMEND를 누를 때 담겨 있던 음악 ${list.length}개</p>` : `<p class="hint">지금 목록 ${list.length}개</p>`)
+        + (list.length ? `<div class="tiles">${list.map((it, i) => tile(it, cur ? `feed:${cur.id}:${i}` : 'lib:' + i)).join('')}</div>` : '<p class="rail-empty">아직 담은 음악이 없습니다.</p>');
+    }
     else if (tab === 'taste') {
       const withP = an.filter(f => f.profile && f.profile.summary), last = withP[0];
       pane = last ? `<p class="hint">최근 분석 · ${date(last.createdAt)}</p><p class="summary">${esc(last.profile.summary)}</p>

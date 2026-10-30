@@ -115,10 +115,11 @@ async function logout(req, env) {
 const parse = s => { try { return JSON.parse(s); } catch { return null; } };
 const postOut = r => ({ id: 'p' + r.id, uname: keyOf(r.user_id), kind: r.kind, items: arr(parse(r.items)), profile: parse(r.profile), why: r.why || '', createdAt: r.created_at });
 const FEED_PAGE = 60;
+const FEED_KINDS = "('analysis', 'list')";   // 취향 및 추천 + 담은 음악 (the list as it was when ANALYZE & RECOMMEND ran)
 // GET /api/feed?before=<createdAt>&bid=<post key>&user=<user key> — older posts, page by page ([더보기])
 async function feedPage(req, env) {
   const p = new URL(req.url).searchParams, before = int(p.get('before'), 0, 9e15, 0), bid = /^p(\d{1,12})$/.exec(p.get('bid') || ''), uid = idOf(p.get('user'));
-  const where = ["kind != 'add'"], args = [];
+  const where = [`kind IN ${FEED_KINDS}`], args = [];
   if (before) { where.push('(created_at < ? OR (created_at = ? AND id < ?))'); args.push(before, before, bid ? +bid[1] : 0); }
   if (uid) { where.push('user_id = ?'); args.push(uid); }
   const { results } = await env.DB.prepare(`SELECT * FROM posts WHERE ${where.join(' AND ')} ORDER BY created_at DESC, id DESC LIMIT ${FEED_PAGE}`).bind(...args).all();
@@ -128,10 +129,10 @@ async function community(req, env) {
   const me = await currentUser(req, env), admin = isAdmin(env, me);
   const day = kstDay();
   const [posts, users, picks] = await env.DB.batch([
-    env.DB.prepare(`SELECT * FROM posts WHERE kind != 'add' ORDER BY created_at DESC, id DESC LIMIT ${FEED_PAGE}`),
+    env.DB.prepare(`SELECT * FROM posts WHERE kind IN ${FEED_KINDS} ORDER BY created_at DESC, id DESC LIMIT ${FEED_PAGE}`),
     env.DB.prepare(`SELECT u.id, u.nickname, u.created_at, u.locked_until,
         (SELECT COUNT(*) FROM visits v WHERE v.target_id = u.id) AS visits,
-        (SELECT COUNT(*) FROM posts p WHERE p.user_id = u.id AND p.kind != 'add') AS posts,
+        (SELECT COUNT(*) FROM posts p WHERE p.user_id = u.id AND p.kind IN ${FEED_KINDS}) AS posts,
         COALESCE((SELECT MAX(created_at) FROM posts p WHERE p.user_id = u.id), u.created_at) AS last
       FROM users u ORDER BY last DESC LIMIT 500`),
     env.DB.prepare('SELECT * FROM picks WHERE day = ? ORDER BY created_at DESC').bind(day),
@@ -164,14 +165,17 @@ async function putLibrary(req, env, me) {
 /* ---------------- posts, picks, visits, messages ---------------- */
 async function addPost(req, env, me) {
   const b = await readJson(req);
-  const kind = ['found', 'analysis'].includes(b && b.kind) ? b.kind : null;
+  const kind = ['list', 'analysis'].includes(b && b.kind) ? b.kind : null;
   if (!kind) return fail(400, 'bad_kind', '소식 종류가 올바르지 않습니다.');
-  const items = arr(b.items).slice(0, 16).map(cleanItem).filter(Boolean);
+  const items = arr(b.items).slice(0, kind === 'list' ? 100 : 16).map(cleanItem).filter(Boolean);
   if (!items.length) return fail(400, 'empty', '올릴 음악이 없습니다.');
+  if (kind === 'list' && items.length < 5) return fail(400, 'too_few', '담은 음악은 5개 이상일 때 올라갑니다.');
+  // one list per user per day: the newest replaces that day's earlier one
+  if (kind === 'list') { const t = now(), d0 = Date.parse(kstDay(t).replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3') + 'T00:00:00+09:00'); await env.DB.prepare("DELETE FROM posts WHERE user_id = ? AND kind = 'list' AND created_at >= ?").bind(me.id, d0).run(); }
   if (await bump(env, 'post:' + me.id + ':' + Math.floor(now() / 3600000), 3600000) > 60) return fail(429, 'too_many', '소식은 1시간에 60개까지 올릴 수 있습니다.');
   const profile = kind === 'analysis' ? cleanProfile(b.profile) : null;
   const row = await env.DB.prepare('INSERT INTO posts (user_id, kind, items, profile, why, created_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING *')
-    .bind(me.id, kind, JSON.stringify(items), profile ? JSON.stringify(profile) : null, kind === 'found' ? clip(b.why, 300) : '', now()).first();
+    .bind(me.id, kind, JSON.stringify(items), profile ? JSON.stringify(profile) : null, '', now()).first();
   return json({ post: postOut(row) });
 }
 async function deletePost(env, me, key) {
@@ -198,16 +202,18 @@ async function profile(req, env, key) {
   if (!user) return fail(404, 'no_user', '이 유저는 더 이상 없습니다.');
   const me = await currentUser(req, env);
   if (me && me.id !== user.id) await env.DB.prepare('INSERT OR IGNORE INTO visits (target_id, visitor_id, day) VALUES (?, ?, ?)').bind(user.id, me.id, kstDay()).run();
-  const [lib, msgs, posts] = await env.DB.batch([
+  const [lib, msgs, posts, lists] = await env.DB.batch([
     env.DB.prepare('SELECT items FROM library WHERE user_id = ?').bind(user.id),
     env.DB.prepare('SELECT id, from_user_id, body, created_at FROM messages WHERE to_user_id = ? ORDER BY created_at DESC LIMIT 40').bind(user.id),
     env.DB.prepare("SELECT * FROM posts WHERE user_id = ? AND kind = 'analysis' ORDER BY created_at DESC, id DESC LIMIT 10").bind(user.id),
+    env.DB.prepare("SELECT * FROM posts WHERE user_id = ? AND kind = 'list' ORDER BY created_at DESC, id DESC LIMIT 12").bind(user.id),
   ]);
   return json({
     user: { key: keyOf(user.id), username: user.nickname, createdAt: user.created_at },
     library: lib.results[0] ? arr(parse(lib.results[0].items)) : [],
     messages: msgs.results.map(m => ({ id: 'm' + m.id, from: keyOf(m.from_user_id), body: m.body, createdAt: m.created_at })),
     analyses: posts.results.map(postOut),
+    lists: lists.results.map(postOut),
   });
 }
 async function postMessage(req, env, me, key) {
@@ -371,11 +377,11 @@ async function searchLookup(req) {
   const q = clip(new URL(req.url).searchParams.get('q'), 80);
   if (q.length < 1) return json({ items: [] });
   return cached(req, 3600, async () => {
-    const [kr, us, dz] = await Promise.all([
-      itunesRaw({ term: q, entity: 'song', limit: '25' }, 'KR'), itunesRaw({ term: q, entity: 'album', limit: '15' }, 'US'),
+    const [usA, usS, dz] = await Promise.all([
+      itunesRaw({ term: q, entity: 'album', limit: '20' }, 'US'), itunesRaw({ term: q, entity: 'song', limit: '20' }, 'US'),
       getJson(`https://api.deezer.com/search/album?limit=12&q=${encodeURIComponent(q)}`),
     ]);
-    return { apple: [...arr(kr), ...arr(us)], deezer: arr(dz && dz.data), partial: !kr && !us && !dz };
+    return { apple: [...arr(usA), ...arr(usS)], deezer: arr(dz && dz.data), partial: !usA && !usS && !dz };
   });
 }
 

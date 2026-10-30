@@ -617,3 +617,14 @@ button,a,summary,label{-webkit-tap-highlight-color:transparent}
 .prof-tabs button::before{content:"[\00a0]"!important;margin-right:.35em}
 .prof-tabs button[aria-pressed="true"]::after{left:.1em}
 .card .chk{opacity:.72}
+/* 담은 음악: one set per day behind a [yyyy.mm.dd] box */
+.set-ln{display:flex;align-items:baseline;gap:0 .7em;flex-wrap:wrap}
+.set-ln>span{opacity:.85}
+.date-box{border:0;background:none;padding:.1em .05em;margin:0;color:var(--ink);font:inherit;font-weight:700;cursor:pointer;white-space:nowrap}
+.date-box::before{content:"["}.date-box::after{content:"]"}
+.date-box[aria-expanded="true"],.date-box[aria-pressed="true"]{background:var(--ink);color:var(--paper);text-shadow:none}
+.date-boxes{display:flex;flex-wrap:wrap;gap:.3em .8em}
+.set-strip{display:flex;gap:.3em;align-items:center;width:100%;border:0;background:none;padding:0;margin:.2em 0 0;cursor:pointer;overflow:hidden}
+.set-strip .ss{position:relative;flex:none;width:calc(var(--lh) * 2.2em);height:calc(var(--lh) * 2.2em);overflow:hidden}
+.set-strip .ss-more{flex:none;padding-left:.3em;font-weight:700}
+@media (hover:hover){.date-box:hover{background:var(--ink);color:var(--paper)}}
