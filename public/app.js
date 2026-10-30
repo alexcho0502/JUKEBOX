@@ -22,13 +22,9 @@
     dig: '비슷한 결 안에서 덜 알려진 숨은 작품을 깊게 파고듭니다.',
     leap: '연결고리 하나를 따라 의외의 장르와 시대로 넘어갑니다.',
   };
+  // what a first-time visitor (or anyone after logging out) sees: a single example
   const EXAMPLES = [
-    { type: 'album', artist: "D'Angelo and The Vanguard", title: 'Black Messiah', year: '2014', genre: 'Neo-Soul, Funk', country: '미국', colors: ['#111111', '#2b2b2b', '#e9e4dc'], style: 'minimal', rating: 5 },
-    { type: 'album', artist: 'Radiohead', title: 'In Rainbows', year: '2007', genre: 'Art Rock', country: '영국', colors: ['#121212', '#e8502e', '#f2c14e'], style: 'mesh', rating: 5 },
-    { type: 'album', artist: 'Portishead', title: 'Dummy', year: '1994', genre: 'Trip Hop', country: '영국', colors: ['#0e2a3b', '#c49a3c', '#e8e2d2'], style: 'mesh', rating: 4.5 },
-    { type: 'album', artist: 'Massive Attack', title: 'Mezzanine', year: '1998', genre: 'Trip Hop', country: '영국', colors: ['#0b0b0b', '#8a8a8a', '#d9d9d9'], style: 'minimal', rating: 4.5 },
-    { type: 'album', artist: 'Cocteau Twins', title: 'Heaven or Las Vegas', year: '1990', genre: 'Dream Pop', country: '영국', colors: ['#c94b6d', '#f2b5c4', '#2d1b4e'], style: 'type', rating: 4 },
-    { type: 'track', artist: 'Björk', title: 'Jóga', album: 'Homogenic', year: '1997', genre: 'Art Pop', country: '아이슬란드', colors: ['#1c2a4a', '#d94f70', '#f0d6c2'], style: 'mesh', rating: 5 },
+    { type: 'album', artist: 'Michael Jackson', title: 'Thriller', year: '1982', genre: 'Pop, R&B', country: '미국', colors: ['#0d0d0d', '#e8e2d6', '#b8322a'], style: 'minimal' },
   ];
 
   /* ---------------- local state ---------------- */
@@ -39,6 +35,7 @@
     const s = JSON.parse(localStorage.getItem(STORE) || 'null');
     if (s && Array.isArray(s.items)) state = { ...state, ...s, opts: { ...state.opts, ...(s.opts || {}) }, results: s.results || emptyRes(), feedback: s.feedback || {} };
   } catch (e) { /* ignore */ }
+  if (state.isExample) state.items = EXAMPLES.map(x => ({ ...x }));
   state.items.forEach(it => delete it.pending);
   const O = state.opts;
   const save = () => { try { localStorage.setItem(STORE, JSON.stringify(state)); } catch (e) { /* ignore */ } };
@@ -70,7 +67,9 @@
     const ref = o.artist && o.title ? ` data-ck="${esc(ck(o))}" data-a="${esc(o.artist)}" data-t="${esc(o.title)}" data-y="${o.type === 'track' ? 'track' : 'album'}"` : '';
     return `<div class="art art-${style} ${extra}"${ref} style="--c0:${c0};--c1:${c1};--c2:${c2}">${style === 'type' ? `<span class="tx">${esc(t.length > 24 ? t.slice(0, 22) + '…' : t)}</span>` : ''}</div>${cov ? coverImg(cov) : ''}`;
   }
-  const coverImg = u => `<img class="art-img" src="${esc(u)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="window.__jbCoverFail&&window.__jbCoverFail(this)">`;
+  // thumbnails don't need 600–1000px images: ask the art servers for a size that fits (4–10× fewer bytes)
+  const thumb = u => String(u).replace(/\/\d{3,4}x\d{3,4}bb\./, '/300x300bb.').replace(/\/\d{3,4}x\d{3,4}(-\d+-\d+-\d+-\d+)?\.jpg$/, '/500x500$1.jpg').replace(/\/front-(500|1200)$/, '/front-250');
+  const coverImg = u => `<img class="art-img" src="${esc(thumb(u))}" data-u="${esc(u)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="window.__jbCoverFail&&window.__jbCoverFail(this)">`;
   const compact = it => ({ type: it.type === 'track' ? 'track' : 'album', title: String(it.title || '').slice(0, 160), artist: String(it.artist || '').slice(0, 120), album: String(it.album || '').slice(0, 160), year: String(it.year || '').slice(0, 6), genre: String(it.genre || arr(it.primary).join(', ') || '').slice(0, 80), country: String(it.country || '').slice(0, 40), colors: arr(it.colors).filter(x => HEX.test(String(x))).slice(0, 3), style: ['mesh', 'minimal', 'type'].includes(it.style) ? it.style : 'mesh', cover: /^https:\/\//.test(it.cover || '') ? it.cover : '', link: /^https:\/\//.test(it.link || '') ? it.link : '' });
   const itemKey = it => ((it.artist || '') + '|' + (it.title || '')).toLowerCase();
 
@@ -85,7 +84,7 @@
     let d = null; try { d = await r.json(); } catch (e) { /* not json */ }
     if (!r.ok) {
       const err = Object.assign(new Error((d && d.error && d.error.message) || `서버 오류 (${r.status})`), { code: d && d.error && d.error.code, status: r.status });
-      if (r.status === 401 && auth && path !== 'login') { auth = null; saveAuth(); renderAllComm(); }
+      if (r.status === 401 && auth && path !== 'login') { auth = null; saveAuth(); resetLocal(); renderAllComm(); }
       throw err;
     }
     return d;
@@ -227,7 +226,7 @@
   function scanCovers() {
     $$('.art[data-ck]').forEach(a => {
       if (a.classList.contains('pending')) return;
-      if ((state.isExample && a.closest('#music-list')) || a.closest('.empty')) return;   // examples keep their drawn covers
+      if (a.closest('.empty')) return;   // the sample card keeps its drawn cover
       const n = a.nextElementSibling; if (n && n.classList.contains('art-img')) return;
       const k = a.dataset.ck, c = coverMap[k];
       if (c && (c.u || Date.now() - c.t < 20 * 60000)) { if (c.u) a.insertAdjacentHTML('afterend', coverImg(c.u)); return; }
@@ -240,8 +239,8 @@
     if (repairing) return; repairing = true;
     try {
       while (repairQ.size) {
-        // three at a time
-        const batch = [...repairQ.entries()].slice(0, 3);
+        // four at a time
+        const batch = [...repairQ.entries()].slice(0, 4);
         await Promise.all(batch.map(async ([k, o]) => {
           let r = { u: '', answered: false }; try { r = await findCover(o); } catch (e) { /* keep r */ }
           repairQ.delete(k); triedAt.set(k, Date.now());
@@ -249,7 +248,6 @@
           if (r.u || r.answered) { coverMap[k] = { u: r.u, t: Date.now() }; saveCovers(); }
           if (r.u) applyCover(k, o, r.u);
         }));
-        await new Promise(r => setTimeout(r, 250));
       }
     } finally { repairing = false; }
   }
@@ -266,7 +264,7 @@
     if (touched) { save(); if (!state.isExample) scheduleLibSync(); }
   }
   window.__jbCoverFail = img => {
-    const a = img.previousElementSibling, src = img.getAttribute('src');
+    const a = img.previousElementSibling, src = img.getAttribute('data-u') || img.getAttribute('src');
     img.remove();
     if (src && !/^data:/.test(src)) { badCover.add(src); }
     if (!a || !a.dataset.ck) return;
@@ -621,7 +619,11 @@
   function remember(it) {
     if (!it.title || !it.artist) return null;
     const k = ck(it), old = S.pool.get(k);
-    if (old) { ['year', 'genre', 'cover', 'link', 'album'].forEach(f => { if (!old[f] && it[f]) old[f] = it[f]; }); if (!it.derived) old.derived = false; return old; }
+    if (old) {
+      ['year', 'genre', 'cover', 'link', 'album'].forEach(f => { if (!old[f] && it[f]) old[f] = it[f]; });
+      if (/mzstatic\.com/.test(it.cover || '') && !/mzstatic\.com/.test(old.cover || '')) old.cover = it.cover;   // Apple's art loads fastest
+      if (!it.derived) old.derived = false; return old;
+    }
     S.pool.set(k, it); if (S.pool.size > 700) S.pool.delete(S.pool.keys().next().value);
     return it;
   }
@@ -700,7 +702,7 @@
   }
   const head = (l, r = '') => `<div class="ac-h"><span>${l}</span>${r}</div>`;
   const closeBtn = '<button type="button" class="ac-close" data-ac-close>닫기</button>';
-  const foot = '<p class="ac-rule" aria-hidden="true"></p><div class="ac-foot"><span>누르면 담기고, 다시 누르면 빠집니다</span><span>APPLE MUSIC · MUSICBRAINZ</span></div>';
+  const foot = '<p class="ac-rule" aria-hidden="true"></p><div class="ac-foot"><span>누르면 담기고, 다시 누르면 빠집니다</span><span class="src">APPLE MUSIC · MUSICBRAINZ</span></div>';
   function paint(html) {
     acEl.innerHTML = html; acEl.hidden = false; qEl.setAttribute('aria-expanded', 'true');
     S.idx = -1; qEl.removeAttribute('aria-activedescendant');
@@ -810,7 +812,10 @@
       let h = head('QUICK ADD · 타자 없이 담기', closeBtn) + '<p class="ac-rule" aria-hidden="true"></p>';
       more.forEach(({ a, list }) => { if (list.length) h += head(`${esc(a.toUpperCase())}의 다른 앨범`, `<button type="button" class="ac-more" data-ac-artist="${esc(a)}">전체</button>`) + list.map(rowItem).join(''); });
       if (chart && chart.length) h += head('지금 많이 듣는 앨범 · KR') + chart.slice(0, 8).map(rowItem).join('');
-      if (!more.some(x => x.list.length) && !(chart && chart.length)) h += chart ? '<div class="ac-empty">두 글자만 입력해 보세요. 예: radio, 아이유</div>' : '<div class="ac-loading"><span class="dots">불러오는 중입니다</span></div>';
+      if (!more.some(x => x.list.length) && !(chart && chart.length)) {
+        if (chart) { acEl.hidden = true; qEl.setAttribute('aria-expanded', 'false'); return; }   // nothing to suggest: stay out of the way
+        h += '<div class="ac-loading"><span class="dots">불러오는 중입니다</span></div>';
+      }
       paint(h + foot);
     };
     let more = [], chart = null;
@@ -986,6 +991,7 @@
     if (more) renderResults(); else { $('#music-results').innerHTML = '<div class="status" id="music-status"></div>'; }
     $('#music-results').scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
     runT0 = Date.now();
+    const marks = window.__jbTiming = {}; const mark = k => { marks[k] = Date.now() - runT0; };
     setStatus('목록을 분석하고 있습니다. 첫 추천은 보통 10초 안팎에 찍힙니다.', true);
     const ctl = runCtl = new AbortController();
     const tick = setInterval(() => { const e = $('#music-status .el'); if (e) e.textContent = elapsed(); }, 1000);
@@ -997,7 +1003,7 @@
       sec.innerHTML = `<div class="sec-head"><h3>RECOMMENDED</h3></div><div class="cols"><span>NO ITEM</span><span>MATCH SCORE / 100</span></div><div class="cards" id="music-recs"></div>`;
       $('#music-results').append(sec);
     };
-    const showRec = r => { r._chk = !r.verified; const at = state.results.recs.push(r) - 1; got++; ensureSec(); $('#music-recs').append(recCard(r, at, { fresh: true })); };
+    const showRec = r => { r._chk = !r.verified; const at = state.results.recs.push(r) - 1; got++; ensureSec(); $('#music-recs').append(recCard(r, at, { fresh: true })); if (!r.verified) later(r); };
     const redraw = r => { const at = state.results.recs.indexOf(r), old = at >= 0 && $('#music-recs') && $('#music-recs').children[at]; if (old) old.replaceWith(recCard(r, at)); };
     // a recommendation no music service knows is almost always made up: take it out, bring in a spare
     const dropRec = r => {
@@ -1020,15 +1026,17 @@
         if (state.results.recs.some(x => recKey(x) === k) || spare.some(x => recKey(x.r) === k) || gone.includes(`${r.artist} — ${r.title}`)) return;
         byI.set(key, r);
         if (got >= want) { spare.push({ i: key, r }); return; }   // spares wait unseen in case one gets dropped
+        if (!marks.first) mark('first');
         showRec(r);
         setStatus(`${got}개가 도착했습니다 · 음원 사이트에서 실제로 있는지 확인하고 있습니다`, true); save();
       } else if (ev.t === 'fix') {
         const r = byI.get(key); if (!r) return;
-        Object.assign(r, ev.patch); if (r.verified) r._chk = false;
+        Object.assign(r, ev.patch); if (r.verified) { r._chk = false; if (ev.patch.verified) srvConfirmed++; }
         redraw(r); save();
       } else if (ev.t === 'drop') {
         const r = byI.get(key); if (r) dropRec(r);
-      } else if (ev.t === 'done') done = ev;
+      } else if (ev.t === 'meta') { if (!ev.verify) grace = 0; }   // the server can't reach Apple: the browser checks at once
+      else if (ev.t === 'done') done = ev;
       else if (ev.t === 'error') failed = ev;
     };
     const pump = async body => {
@@ -1045,42 +1053,54 @@
       if (buf.trim()) { try { onEvent(JSON.parse(buf)); } catch (e) { /* skip */ } }
       return null;
     };
-    // what the server couldn't confirm, the browser checks itself on Apple Music (and MusicBrainz before dropping)
-    const browserCheck = async () => {
-      const todo = state.results.recs.slice(before).filter(r => !r.verified), needPick = [];
-      for (let k = 0; k < todo.length; k += 2) {
-        await Promise.all(todo.slice(k, k + 2).map(async r => {
-          const x = await existsInBrowser(r).catch(() => ({ found: false, answered: false }));
-          if (x.found) {
-            r.verified = true; r._chk = false;
-            ['cover', 'link', 'year'].forEach(f => { if (x[f] && !r[f]) r[f] = x[f]; });
-            if (r.type === 'track') {
-              if (x.apple) { const al = String(x.apple.collectionName || '').replace(/ - (Single|EP)$/, ''); if (al && !looseEq(al, r.album || '')) r.album = al; }
-              else r.album = '';                                    // can't vouch for the album name: leave it out
-            } else if (r.start_with) {
-              // "먼저 들어볼 곡" must really be on this album
-              const tracks = x.apple ? await appleTracks(x.apple.collectionId, x.apple.country) : [];
-              const hit = tracks.find(t => looseEq(t, r.start_with));
-              if (hit) r.start_with = hit;
-              else if (tracks.length) { r.start_with = ''; needPick.push({ r, tracks }); }
-              else r.start_with = '';                                // no tracklist to check against: hide it
-            }
-            redraw(r);
-          }
-          else if (x.answered) dropRec(r);
-          else { r._chk = false; redraw(r); }
-        }));
-      }
+    // checking runs alongside the stream: each card is looked up on Apple (MusicBrainz before anything is dropped) as it arrives
+    // if the server couldn't confirm anything last time (it can't reach Apple), don't wait for it this time
+    let srvBlind = 0; try { srvBlind = +localStorage.getItem('jukebox.v2.srvblind') || 0; } catch (e) { /* ignore */ }
+    const checks = new Map(), waiting = [], needPick = []; let active = 0, grace = Date.now() - srvBlind < 1800000 ? 0 : 2500, srvConfirmed = 0;
+    const checkOne = async r => {
+      if (r.verified || !(state.results.recs.includes(r) || spare.some(x => x.r === r))) return;
+      const x = await existsInBrowser(r).catch(() => ({ found: false, answered: false }));
+      if (r.verified) return;                                    // the server confirmed it meanwhile
+      if (x.found) {
+        r.verified = true; r._chk = false;
+        ['cover', 'link', 'year'].forEach(f => { if (x[f] && !r[f]) r[f] = x[f]; });
+        if (r.type === 'track') {
+          if (x.apple) { const al = String(x.apple.collectionName || '').replace(/ - (Single|EP)$/, ''); if (al && !looseEq(al, r.album || '')) r.album = al; }
+          else r.album = '';                                      // can't vouch for the album name: leave it out
+        } else if (r.start_with) {
+          // "먼저 들어볼 곡" must really be on this album
+          const tracks = x.apple ? await appleTracks(x.apple.collectionId, x.apple.country) : [];
+          const hit = tracks.find(t => looseEq(t, r.start_with));
+          if (hit) r.start_with = hit;
+          else if (tracks.length) { r.start_with = ''; needPick.push({ r, tracks }); }
+          else r.start_with = '';                                  // no tracklist to check against: hide it
+        }
+        redraw(r);
+      } else if (x.answered) dropRec(r);
+      else { r._chk = false; redraw(r); }
+    };
+    const pumpChecks = () => { while (active < 3 && waiting.length) { active++; waiting.shift()().finally(() => { active--; pumpChecks(); }); } };
+    const enqueue = r => {
+      if (r.verified || checks.has(r)) return;
+      checks.set(r, new Promise(res => { waiting.push(() => checkOne(r).catch(() => {}).finally(res)); pumpChecks(); }));
+    };
+    let settling = false;
+    const later = r => (settling ? enqueue(r) : setTimeout(() => enqueue(r), grace));   // a moment for the server to confirm it first
+    const settle = async () => {
+      settling = true;
+      state.results.recs.slice(before).forEach(enqueue);
+      for (;;) { const n = checks.size; await Promise.all([...checks.values()]); if (checks.size === n) break; }   // spares shown meanwhile get checked too
       if (needPick.length) {
-        const d = await api('pick', { method: 'POST', body: { items: needPick.map(({ r, tracks }) => ({ artist: r.artist, title: r.title, tracks: tracks.slice(0, 40) })) } }).catch(() => null);
-        needPick.forEach(({ r }, n) => { const t = d && arr(d.picks)[n]; if (t) { r.start_with = t; redraw(r); } });
+        const list = needPick.splice(0);
+        const d = await api('pick', { method: 'POST', body: { items: list.map(({ r, tracks }) => ({ artist: r.artist, title: r.title, tracks: tracks.slice(0, 40) })) } }).catch(() => null);
+        list.forEach(({ r }, n) => { const t = d && arr(d.picks)[n]; if (t) { r.start_with = t; redraw(r); } });
       }
-      save();
+      settling = false; save();
     };
     try {
-      failed = await pump(payload(more));
+      failed = await pump(payload(more)); mark('stream');
       if (!failed) {
-        await browserCheck();
+        await settle(); mark('checked');
         // still short: ask again for real works, telling the engine which titles were made up
         while (!failed && got < want && round < 2 && Date.now() - runT0 < 80000 && got + dropped > 0) {
           round++; spare.length = 0;
@@ -1088,12 +1108,15 @@
           const body = payload(true);
           body.more.fill = want - got; body.more.gone = gone.slice(-40);
           failed = await pump(body);
-          if (!failed) await browserCheck();
+          if (!failed) await settle();
         }
         failed = null;
       }
     } catch (e) { failed = late ? { message: '추천 엔진의 응답이 너무 늦어 멈췄습니다. 잠시 뒤 다시 시도해 주세요.' } : e && e.name === 'AbortError' ? { code: 'cancelled' } : { message: '서버와 연결이 끊겼습니다. 다시 시도해 주세요.' }; }
+    mark('end');
+    try { if (got && !srvConfirmed) localStorage.setItem('jukebox.v2.srvblind', String(Date.now())); else if (srvConfirmed) localStorage.removeItem('jukebox.v2.srvblind'); } catch (e) { /* ignore */ }
     state.results.recs.forEach(r => { delete r._chk; });
+    factCheck(state.results.recs.slice(before));
     clearInterval(tick); clearTimeout(guard);
     setBusy(false); save(); renderResults();
     if (failed && failed.code === 'cancelled') setStatus(got ? `멈췄습니다. ${got}개까지 받았습니다.` : '멈췄습니다.', false);
@@ -1107,6 +1130,21 @@
         const st = $('#music-status');
         st.innerHTML = `<span class="msg">${esc(st.textContent.replace(/\s*“취향 맞음”.*$/, ''))} 아직 Join하지 않아 Community에는 올라가지 않았습니다.</span><button class="btn" type="button" data-join-share>JOIN하고 공유하기</button>`;
       }
+    }
+  }
+  // afterwards, quietly: the first-release year and the artist's country from MusicBrainz replace the engine's guesses
+  async function factCheck(recs) {
+    for (let k = 0; k < recs.length; k += 2) {
+      await Promise.all(recs.slice(k, k + 2).map(async r => {
+        const x = await catalogInfo(r).catch(() => ({}));
+        let changed = false;
+        if (x.year && /^\d{4}$/.test(x.year) && x.year !== r.year) { r.year = x.year; changed = true; }
+        if (x.country && x.country !== r.country) { r.country = x.country; changed = true; }
+        if (!changed) return;
+        const at = state.results.recs.indexOf(r), old = at >= 0 && $('#music-recs') && $('#music-recs').children[at];
+        if (old) old.replaceWith(recCard(r, at));
+        save();
+      }));
     }
   }
   $('#music-go').addEventListener('click', () => run(false));
@@ -1178,7 +1216,7 @@
       if (!older.size) feedMoreSrv = !!d.feedMore;
       if (!d.feedMore && !older.size) myMoreSrv = false;
       live.accounts = new Map(arr(d.users).map(u => [u.key, u]));
-      if (auth && !d.me) { auth = null; saveAuth(); toast('로그인이 만료되었습니다. 다시 Join해 주세요'); }
+      if (auth && !d.me) { auth = null; saveAuth(); resetLocal(); toast('로그인이 만료되었습니다. 다시 Join해 주세요'); }
       else if (auth && d.me) { auth.admin = d.me.admin; auth.username = d.me.nickname; saveAuth(); }
       live.ready = true; live.error = '';
     } catch (e) { live.error = e.code || 'error'; }
@@ -1225,12 +1263,21 @@
     });
   }
   $('#acct').addEventListener('click', async e => {
-    if (e.target.closest('[data-logout]')) { api('logout', { method: 'POST' }).catch(() => {}); auth = null; saveAuth(); toast('로그아웃했습니다'); renderAllComm(); renderResults(); return; }
+    if (e.target.closest('[data-logout]')) { api('logout', { method: 'POST' }).catch(() => {}); auth = null; saveAuth(); resetLocal(); toast('로그아웃했습니다'); renderAllComm(); return; }
     if (e.target.closest('[data-myprof]') && auth) { openProfile(auth.key); return; }
   });
 
   // library sync (my list ↔ server)
   let libT = 0;
+  // back to a fresh visitor's page: the example only, no results. (The account's list stays saved on the server
+  // and comes back on the next Join.)
+  function resetLocal() {
+    clearTimeout(libT);
+    state.items = EXAMPLES.map(x => ({ ...x })); state.isExample = true;
+    state.results = emptyRes(); state.feedback = {}; pendingShare = null;
+    save(); renderList(); renderResults(); hideAc();
+    const q = $('#music-q'); if (q) q.value = '';
+  }
   function scheduleLibSync() {
     if (!canAct()) return;
     clearTimeout(libT);

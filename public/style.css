@@ -628,3 +628,12 @@ button,a,summary,label{-webkit-tap-highlight-color:transparent}
 .set-strip .ss{position:relative;flex:none;width:calc(var(--lh) * 2.2em);height:calc(var(--lh) * 2.2em);overflow:hidden}
 .set-strip .ss-more{flex:none;padding-left:.3em;font-weight:700}
 @media (hover:hover){.date-box:hover{background:var(--ink);color:var(--paper)}}
+/* search footer: the whole sentence, the sources on their own line */
+.ac-foot{display:grid;grid-template-columns:minmax(0,1fr);gap:0;white-space:normal}
+.ac-foot span{overflow:visible;text-overflow:clip}
+.ac-foot .src{justify-self:end;opacity:.8}
+/* SEARCH line 1.2× (same letter spacing) so it reads at a glance */
+.entry>.search-kv{font-size:1.2em}
+.entry>.search-kv .k{font-weight:700}
+.q-x{font-size:.8em;bottom:.3em}
+.q-wrap input[type=search]{padding-right:2.4em}

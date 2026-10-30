@@ -260,13 +260,13 @@ const norm = t => String(t || '').toLowerCase().normalize('NFKD').replace(/[Ì€-Í
 const same = (a, b) => { const x = norm(a), y = norm(b); return !!x && !!y && (x === y || (x.length > 4 && y.length > 4 && (x.includes(y) || y.includes(x)))); };
 const art600 = u => okUrl(String(u || '').replace(/\/\d+x\d+bb\./, '/600x600bb.'), COVER_HOST);
 // MusicBrainz asks for about one request a second. Searches someone is waiting on go before background lookups (covers, info).
-const mbWait = { high: [], low: [] }; let mbLast = 0, mbTimer = 0;
-function mbTurn(high) {
-  return new Promise(res => { (high ? mbWait.high : mbWait.low).push(res); mbPump(); });
+const mbWait = { high: [], mid: [], low: [] }; let mbLast = 0, mbTimer = 0;
+function mbTurn(prio) {
+  return new Promise(res => { (mbWait[prio] || mbWait.low).push(res); mbPump(); });
 }
 function mbPump() {
   if (mbTimer) return;
-  const next = mbWait.high.shift() || mbWait.low.shift(); if (!next) return;
+  const next = mbWait.high.shift() || mbWait.mid.shift() || mbWait.low.shift(); if (!next) return;
   const wait = Math.max(0, mbLast + 1000 - now());
   mbTimer = setTimeout(() => { mbTimer = 0; mbLast = now(); next(); mbPump(); }, wait);
 }
@@ -285,7 +285,7 @@ function deezerOpen() {
 let appleFails = 0, appleDownUntil = 0;
 async function getJson(url, headers = {}, ttl = 86400) {
   if (url.startsWith('https://api.deezer.com/search') && !(await deezerOpen()).open) return null;
-  if (url.startsWith('https://musicbrainz.org/')) await mbTurn(headers['x-priority'] === 'high');
+  if (url.startsWith('https://musicbrainz.org/')) await mbTurn(headers['x-priority']);
   try {
     const { 'x-priority': _p, ...hdrs } = headers;
     const go = () => fetch(url, { headers: { accept: 'application/json', ...hdrs }, cf: { cacheTtl: ttl, cacheEverything: true }, signal: AbortSignal.timeout(8000) });
@@ -360,12 +360,9 @@ async function coverLookup(req) {
     const dc = dh && okUrl((track ? dh.album : dh) && ((track ? dh.album : dh).cover_xl || (track ? dh.album : dh).cover_big), COVER_HOST);
     if (dc) return { cover: dc, from: 'deezer' };
     if (!track) {
-      const s = seen(await getJson(`https://musicbrainz.org/ws/2/release-group?fmt=json&limit=5&query=${encodeURIComponent(`releasegroup:"${title.replace(/"/g, '')}" AND artist:"${artist.replace(/"/g, '')}"`)}`, { 'user-agent': UA }, 604800));
+      const s = seen(await getJson(`https://musicbrainz.org/ws/2/release-group?fmt=json&limit=5&query=${encodeURIComponent(`releasegroup:"${title.replace(/"/g, '')}" AND artist:"${artist.replace(/"/g, '')}"`)}`, { 'user-agent': UA, 'x-priority': 'mid' }, 604800));
       const rg = s && arr(s['release-groups']).find(x => same(x.title, title));
-      if (rg) {
-        const caa = await fetch(`https://coverartarchive.org/release-group/${rg.id}/front-500`, { method: 'HEAD', redirect: 'manual', signal: AbortSignal.timeout(6000) }).catch(() => null);
-        if (caa && (caa.status === 307 || caa.status === 302 || caa.status === 200)) return { cover: `https://coverartarchive.org/release-group/${rg.id}/front-500`, from: 'caa' };
-      }
+      if (rg) return { cover: `https://coverartarchive.org/release-group/${rg.id}/front-250`, from: 'caa', year: String(rg['first-release-date'] || '').slice(0, 4) };
     }
     return { cover: '', partial: !tried.ok };
   });
@@ -733,6 +730,7 @@ async function recommend(req, env) {
     const budget = { n: 36 }, checks = [], recs = [], seen = new Set(), picks = [], gone = [], t0 = now();
     const want = b && b.more && b.more.fill ? int(b.more.fill, 1, 7, 1) : [3, 5, 7].includes(+(b && b.opts && b.opts.n)) ? +b.opts.n : 5;
     let fixed = 0, dropped = 0, profiled = false;
+    send({ t: 'meta', verify: now() >= appleDownUntil });
     const onLine = line => {
       const x = recLine(line); if (!x) return;
       if (x.profile) { if (!profiled) { profiled = true; send({ t: 'profile', profile: x.profile }); } return; }
