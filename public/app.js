@@ -154,7 +154,13 @@
     im.onload = () => { clearTimeout(t); res(im.naturalWidth > 1); }; im.onerror = () => { clearTimeout(t); res(false); };
     im.src = url;
   });
-  const dz = (path, ms = 4500) => jsonp(`https://api.deezer.com/${path}${path.includes('?') ? '&' : '?'}output=jsonp`, ms).then(d => (d && !d.error ? d : null));
+  // Deezer's search only shows what is licensed where you are; where Deezer isn't open (Korea) it returns unrelated albums
+  let dzOpenP = null;
+  const dzOpen = () => (dzOpenP || (dzOpenP = jsonp('https://api.deezer.com/infos?output=jsonp', 4000).then(d => !!(d && d.open))));
+  const dz = async (path, ms = 4500) => {
+    if (path.startsWith('search') && !(await dzOpen())) return null;
+    return jsonp(`https://api.deezer.com/${path}${path.includes('?') ? '&' : '?'}output=jsonp`, ms).then(d => (d && !d.error ? d : null));
+  };
   const dzCover = a => (a && (a.cover_xl || a.cover_big || a.cover_medium)) || '';
   // returns { u: cover url or '', answered: did any catalogue actually reply }
   async function findCover(o) {
@@ -182,18 +188,30 @@
     return { u: '', answered };
   }
   // does this recommendation exist? Deezer first, then Apple Music (US, KR) — straight from the browser
+  // does this recommendation exist? Apple Music straight from the browser (US, then KR), Deezer where it's open,
+  // and before dropping anything, MusicBrainz through our server. Dropped only when Apple and MusicBrainz agree it isn't there.
   async function existsInBrowser(r) {
-    const track = r.type === 'track'; let answered = false;
-    const seen = d => { if (d) answered = true; return d; };
-    const d = seen(await dz(`search/${track ? 'track' : 'album'}?limit=10&q=${enc(`artist:"${r.artist}" ${track ? 'track' : 'album'}:"${r.title}"`)}`));
-    const d2 = d && arr(d.data).length ? d : seen(await dz(`search/${track ? 'track' : 'album'}?limit=15&q=${enc(r.artist + ' ' + r.title)}`));
-    const h = d2 && arr(d2.data).find(x => looseEq(x.artist && x.artist.name, r.artist) && looseEq(x.title, r.title));
-    if (h) return { found: true, cover: dzCover(track ? h.album : h), year: String(h.release_date || '').slice(0, 4) };
+    const track = r.type === 'track';
     const q = `https://itunes.apple.com/search?media=music&entity=${track ? 'song' : 'album'}&limit=15&term=${enc(r.artist + ' ' + r.title)}`;
-    const ap = (await Promise.all(['US', 'KR'].map(c => jsonp(q + '&country=' + c, 6000).then(seen)))).flatMap(x => arr(x && x.results));
-    const a = ap.find(x => looseEq(x.artistName, r.artist) && looseEq(track ? x.trackName : x.collectionName, r.title));
-    if (a) return { found: true, cover: art600(a.artworkUrl100), link: (track ? a.trackViewUrl : a.collectionViewUrl) || '', year: String(a.releaseDate || '').slice(0, 4) };
-    return { found: false, answered };
+    let appleAnswered = false, a = null;
+    for (const c of ['US', 'KR']) {
+      const d = await jsonp(q + '&country=' + c, 6000); if (d) appleAnswered = true;
+      a = arr(d && d.results).find(x => looseEq(x.artistName, r.artist) && looseEq(track ? x.trackName : x.collectionName, r.title));
+      if (a) { a.country = c; break; }
+    }
+    if (a) return { found: true, apple: a, cover: art600(a.artworkUrl100), link: (track ? a.trackViewUrl : a.collectionViewUrl) || '', year: String(a.releaseDate || '').slice(0, 4) };
+    const d = await dz(`search/${track ? 'track' : 'album'}?limit=10&q=${enc(`artist:"${r.artist}" ${track ? 'track' : 'album'}:"${r.title}"`)}`);
+    const h = d && arr(d.data).find(x => looseEq(x.artist && x.artist.name, r.artist) && looseEq(x.title, r.title));
+    if (h) return { found: true, cover: dzCover(track ? h.album : h), unsure: true };
+    const m = await api(`exists?type=${track ? 'track' : 'album'}&artist=${enc(r.artist)}&title=${enc(r.title)}`).catch(() => null);
+    if (m && m.mb === true) return { found: true, cover: m.cover || '', year: m.year || '', unsure: true };
+    if (m && m.mb === false) return { found: false, answered: true };     // MusicBrainz has never heard of it either
+    return { found: false, answered: appleAnswered };                     // MusicBrainz unreachable: Apple's "no" decides
+  }
+  // the real tracklist of an Apple album (one lookup)
+  async function appleTracks(id, country) {
+    const d = await jsonp(`https://itunes.apple.com/lookup?id=${id}&entity=song&country=${country || 'US'}`, 6000);
+    return arr(d && d.results).filter(x => x.wrapperType === 'track').map(x => x.trackName);
   }
   const repairQ = new Map(), triedAt = new Map(); let repairing = false;
   function scanCovers() {
@@ -699,7 +717,7 @@
       if (seq === S.seq && S.view === 'search') drawSearch(q, merge(q, got), left > 0);
     })));
     // a catalogue that didn't answer (busy, rate-limited) is asked again next time instead of being remembered as empty
-    const failed = Object.entries(got).filter(([k, d]) => !d && !(k === 'us' && q.length < 3)).map(([k]) => k);
+    const failed = Object.entries(got).filter(([k, d]) => !d && ['apple', 'us', 'srv'].includes(k) && !(k === 'us' && q.length < 3)).map(([k]) => k);
     if (failed.length && S.cache.get(q) === s) S.cache.delete(q);
     const appleDown = !got.apple && !got.us && !(got.srv && arr(got.srv.apple).length);
     if (appleDown && seq === S.seq && S.view === 'search') {
@@ -997,17 +1015,37 @@
       if (buf.trim()) { try { onEvent(JSON.parse(buf)); } catch (e) { /* skip */ } }
       return null;
     };
-    // what the server couldn't confirm, the browser checks itself on Deezer and Apple Music
+    // what the server couldn't confirm, the browser checks itself on Apple Music (and MusicBrainz before dropping)
     const browserCheck = async () => {
-      const todo = state.results.recs.slice(before).filter(r => !r.verified);
+      const todo = state.results.recs.slice(before).filter(r => !r.verified), needPick = [];
       for (let k = 0; k < todo.length; k += 2) {
         await Promise.all(todo.slice(k, k + 2).map(async r => {
           const x = await existsInBrowser(r).catch(() => ({ found: false, answered: false }));
-          if (x.found) { r.verified = true; r._chk = false; ['cover', 'link', 'year'].forEach(f => { if (x[f] && !r[f]) r[f] = x[f]; }); redraw(r); }
+          if (x.found) {
+            r.verified = true; r._chk = false;
+            ['cover', 'link', 'year'].forEach(f => { if (x[f] && !r[f]) r[f] = x[f]; });
+            if (r.type === 'track') {
+              if (x.apple) { const al = String(x.apple.collectionName || '').replace(/ - (Single|EP)$/, ''); if (al && !looseEq(al, r.album || '')) r.album = al; }
+              else r.album = '';                                    // can't vouch for the album name: leave it out
+            } else if (r.start_with) {
+              // "먼저 들어볼 곡" must really be on this album
+              const tracks = x.apple ? await appleTracks(x.apple.collectionId, x.apple.country) : [];
+              const hit = tracks.find(t => looseEq(t, r.start_with));
+              if (hit) r.start_with = hit;
+              else if (tracks.length) { r.start_with = ''; needPick.push({ r, tracks }); }
+              else r.start_with = '';                                // no tracklist to check against: hide it
+            }
+            redraw(r);
+          }
           else if (x.answered) dropRec(r);
           else { r._chk = false; redraw(r); }
         }));
       }
+      if (needPick.length) {
+        const d = await api('pick', { method: 'POST', body: { items: needPick.map(({ r, tracks }) => ({ artist: r.artist, title: r.title, tracks: tracks.slice(0, 40) })) } }).catch(() => null);
+        needPick.forEach(({ r }, n) => { const t = d && arr(d.picks)[n]; if (t) { r.start_with = t; redraw(r); } });
+      }
+      save();
     };
     try {
       failed = await pump(payload(more));

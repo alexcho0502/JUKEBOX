@@ -260,7 +260,21 @@ const norm = t => String(t || '').toLowerCase().normalize('NFKD').replace(/[̀-�
 const same = (a, b) => { const x = norm(a), y = norm(b); return !!x && !!y && (x === y || (x.length > 4 && y.length > 4 && (x.includes(y) || y.includes(x)))); };
 const art600 = u => okUrl(String(u || '').replace(/\/\d+x\d+bb\./, '/600x600bb.'), COVER_HOST);
 let mbChain = Promise.resolve();
+// Deezer's search only covers the catalogue licensed where the request comes from. Cloudflare usually serves Korean
+// visitors from Seoul, where Deezer isn't open, so its search there returns unrelated albums — then we don't use it.
+let dzInfo = null, dzInfoAt = 0;
+function deezerOpen() {
+  if (!dzInfo || now() - dzInfoAt > 3600000) {
+    dzInfoAt = now();
+    dzInfo = fetch('https://api.deezer.com/infos', { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(5000) })
+      .then(r => (r.ok ? r.json() : null)).then(d => ({ open: !!(d && d.open), country: (d && d.country_iso) || '' })).catch(() => ({ open: false, country: '' }));
+  }
+  return dzInfo;
+}
+// Apple sometimes refuses cloud servers: after two failures in a row, leave it alone for ten minutes
+let appleFails = 0, appleDownUntil = 0;
 async function getJson(url, headers = {}, ttl = 86400) {
+  if (url.startsWith('https://api.deezer.com/search') && !(await deezerOpen()).open) return null;
   if (url.startsWith('https://musicbrainz.org/')) {
     const turn = mbChain.then(() => new Promise(r => setTimeout(r, 1050)));
     mbChain = turn; await turn;
@@ -271,40 +285,36 @@ async function getJson(url, headers = {}, ttl = 86400) {
   } catch { return null; }
 }
 async function itunesRaw(params, country = 'US') {
+  if (now() < appleDownUntil) return null;
   const u = new URL('https://itunes.apple.com/search');
   Object.entries({ media: 'music', limit: '8', country, ...params }).forEach(([k, v]) => u.searchParams.set(k, v));
-  const d = await getJson(u.toString()); return d ? arr(d.results) : null;
+  const d = await getJson(u.toString());
+  if (!d) { if (++appleFails >= 2) appleDownUntil = now() + 600000; return null; }
+  appleFails = 0; return arr(d.results);
 }
-async function itunes(params, country = 'US') {
-  const u = new URL('https://itunes.apple.com/search');
-  Object.entries({ media: 'music', limit: '8', country, ...params }).forEach(([k, v]) => u.searchParams.set(k, v));
-  const d = await getJson(u.toString()); return d ? arr(d.results) : [];
-}
+async function itunes(params, country = 'US') { return arr(await itunesRaw(params, country)); }
 async function albumTracks(album) {
   const u = new URL('https://itunes.apple.com/lookup'); u.searchParams.set('id', album.id); u.searchParams.set('entity', 'song'); u.searchParams.set('country', album.country);
   const d = await getJson(u.toString());
   return d ? arr(d.results).filter(x => x.wrapperType === 'track').map(x => x.trackName) : [];
 }
-async function mbTracks(artist, title) {
-  const q = `release:"${title.replace(/"/g, '')}" AND artist:"${artist.replace(/"/g, '')}"`;
-  const s = await getJson(`https://musicbrainz.org/ws/2/release?fmt=json&limit=5&query=${encodeURIComponent(q)}`, { 'user-agent': UA }, 604800);
-  if (!s) return null;
-  const rel = arr(s.releases).find(r => same(r.title, title) && arr(r['artist-credit']).some(a => same(a.name, artist)));
-  if (!rel) return {};
-  const d = await getJson(`https://musicbrainz.org/ws/2/release/${rel.id}?fmt=json&inc=recordings`, { 'user-agent': UA }, 604800);
-  const tracks = d ? arr(d.media).flatMap(m => arr(m.tracks).map(t => t.title)) : [];
-  const rg = rel['release-group'] && rel['release-group'].id;
-  return { tracks, cover: rg ? `https://coverartarchive.org/release-group/${rg}/front-500` : '' };
+// MusicBrainz knows nearly every released record: true = exists, false = no such record, null = couldn't ask
+async function mbExists(type, artist, title) {
+  const a = artist.replace(/"/g, ''), t = title.replace(/"/g, '');
+  const ent = type === 'track' ? 'recording' : 'release-group';
+  const q = type === 'track' ? `recording:"${t}" AND artist:"${a}"` : `releasegroup:"${t}" AND artist:"${a}"`;
+  const s = await getJson(`https://musicbrainz.org/ws/2/${ent}?fmt=json&limit=10&query=${encodeURIComponent(q)}`, { 'user-agent': UA }, 604800);
+  if (!s) return { mb: null };
+  const list = arr(type === 'track' ? s.recordings : s['release-groups']);
+  const hit = list.find(x => same(x.title, title) && arr(x['artist-credit']).some(c => same(c.name || (c.artist && c.artist.name), artist) || same(c.artist && c.artist.name, artist)));
+  return hit ? { mb: true, cover: type === 'track' ? '' : `https://coverartarchive.org/release-group/${hit.id}/front-500`, year: String(hit['first-release-date'] || '').slice(0, 4) } : { mb: false };
 }
-// Deezer: a second catalogue for covers and tracklists Apple doesn't have
-async function dzAlbum(artist, title) {
-  const q = `artist:"${artist.replace(/"/g, '')}" album:"${title.replace(/"/g, '')}"`;
-  const d = await getJson(`https://api.deezer.com/search/album?limit=8&q=${encodeURIComponent(q)}`);
-  if (!d) return null;
-  const hit = arr(d.data).find(x => same(x.artist && x.artist.name, artist) && same(x.title, title));
-  return hit ? { id: hit.id, cover: okUrl(hit.cover_xl || hit.cover_big, COVER_HOST), link: okUrl(hit.link, LINK_HOST) } : {};
+// GET /api/exists?type=&artist=&title= — the browser's last check before it drops a recommendation
+async function existsLookup(req) {
+  const p = new URL(req.url).searchParams, artist = clip(p.get('artist'), 120), title = clip(p.get('title'), 160);
+  if (!artist || !title) return json({ mb: null });
+  return cached(req, 86400 * 7, async () => { const r = await mbExists(p.get('type') === 'track' ? 'track' : 'album', artist, title); return { ...r, partial: r.mb === null }; });
 }
-async function dzTracks(id) { const d = await getJson(`https://api.deezer.com/album/${id}/tracks?limit=100`); return d ? arr(d.data).map(t => t.title) : []; }
 async function findSong(artist, title) {
   const raw = await itunesRaw({ term: `${artist} ${title}`, entity: 'song', limit: '15' });
   const list = arr(raw).filter(x => same(x.artistName, artist) && same(x.trackName, title));
@@ -630,61 +640,66 @@ async function appleAlbum(artist, title, c) {
   const hit = arr(list).find(x => same(x.artistName, artist) && same(x.collectionName, title));
   return hit ? { id: hit.collectionId, country: c, cover: art600(hit.artworkUrl100), link: okUrl(hit.collectionViewUrl, LINK_HOST), answered: true } : { answered: !!list };
 }
+// Fast and strict: confirmed (verified) only by a catalogue hit; dropped (missing) only when Apple answered "no" AND MusicBrainz
+// answered "no". When the server can't reach Apple, nothing is decided here: the browser checks Apple itself.
 async function verifyOne(r, budget) {
   const patch = {}; let fixed = false;
   const take = n => { if (budget.n < n) return false; budget.n -= n; return true; };
+  if (now() < appleDownUntil || !take(1)) return { patch, fixed };
   if (r.type === 'track') {
-    if (!take(1)) return { patch, fixed };
     const s = await findSong(r.artist, r.title);
-    if (s.albums.length) patch.verified = true;
-    if (s.cover) patch.cover = s.cover; if (s.link) patch.link = s.link;
-    let dzAnswered = false, dzFound = false;
-    if (!s.albums.length && take(1)) {
-      const d = await getJson(`https://api.deezer.com/search/track?limit=10&q=${encodeURIComponent(`artist:"${r.artist.replace(/"/g, '')}" track:"${r.title.replace(/"/g, '')}"`)}`);
-      dzAnswered = !!d;
-      const h = d && arr(d.data).find(x => same(x.artist && x.artist.name, r.artist) && same(x.title, r.title));
-      if (h && h.album) { dzFound = true; patch.verified = true; const c = okUrl(h.album.cover_xl || h.album.cover_big, COVER_HOST); if (c && !patch.cover) patch.cover = c; }
+    if (!s.answered) return { patch, fixed };
+    if (s.albums.length) {
+      patch.verified = true;
+      if (s.cover) patch.cover = s.cover; if (s.link) patch.link = s.link;
+      if (!s.albums.some(a => same(a, r.album)) && s.first && s.first !== r.album) { patch.album = s.first; fixed = true; }
+      return { patch, fixed };
     }
-    if (!patch.verified && (s.answered || dzAnswered)) return { patch, fixed, missing: true };
-    if (s.albums.length && !s.albums.some(a => same(a, r.album)) && s.first && s.first !== r.album) { patch.album = s.first; fixed = true; }
+    if (take(1)) {
+      const m = await mbExists('track', r.artist, r.title);
+      if (m.mb === true) { patch.verified = true; patch.album = ''; fixed = true; }      // real, but we can't vouch for the album name
+      else if (m.mb === false) return { patch, fixed, missing: true };
+    }
     return { patch, fixed };
   }
-  if (!take(1)) return { patch, fixed };
   let al = await appleAlbum(r.artist, r.title, 'US');
-  let tracks = [];
-  const usAnswered = al.answered;
-  let dz = null, krAnswered = false;
-  if (!al.id && take(1)) dz = await dzAlbum(r.artist, r.title);                     // Deezer
-  if (!al.id && !(dz && dz.id) && take(1)) { const kr = await appleAlbum(r.artist, r.title, 'KR'); krAnswered = kr.answered; if (kr.id) al = kr; }
-  if (al.id) {
-    patch.verified = true;
-    if (al.cover) patch.cover = al.cover; if (al.link) patch.link = al.link;
-    if (take(1)) tracks = await albumTracks(al);
-  } else if (dz && dz.id) {
-    patch.verified = true;
-    if (dz.cover) patch.cover = dz.cover;
-    if (take(1)) tracks = await dzTracks(dz.id);
-  } else {
-    // nobody that answered has it → made up (or not on any music service, so it can't be played either)
-    if (usAnswered || krAnswered || dz) return { patch, fixed, missing: true };
-    if (take(2)) {
-      const mb = await mbTracks(r.artist, r.title);
-      if (mb && mb.tracks) { patch.verified = true; tracks = mb.tracks; if (mb.cover) patch.cover = mb.cover; }
-      else if (mb) return { patch, fixed, missing: true };
-    }
+  if (!al.answered) return { patch, fixed };
+  if (!al.id && take(1)) { const kr = await appleAlbum(r.artist, r.title, 'KR'); if (kr.id) al = kr; }
+  if (!al.id) {
+    if (!take(1)) return { patch, fixed };
+    const m = await mbExists('album', r.artist, r.title);
+    if (m.mb === false) return { patch, fixed, missing: true };
+    if (m.mb === true) { patch.verified = true; if (m.cover) patch.cover = m.cover; if (r.start_with) { patch.start_with = ''; fixed = true; } }  // no tracklist to check the song against: hide it
+    return { patch, fixed };
   }
+  patch.verified = true;
+  if (al.cover) patch.cover = al.cover; if (al.link) patch.link = al.link;
+  const tracks = take(1) ? await albumTracks(al) : [];
   if (!tracks.length) return { patch, fixed };
   const exact = r.start_with && tracks.find(t => same(t, r.start_with));
   if (exact) { if (exact !== r.start_with) patch.start_with = exact; return { patch, fixed }; }
   // not on this album: take the album's most popular song (Apple ranks song results by popularity)
   let pick = '';
-  if (al.id && take(1)) {
+  if (take(1)) {
     const songs = await itunes({ term: r.artist, entity: 'song', limit: '50' }, al.country);
     const hit = songs.find(x => x.collectionId === al.id) || songs.find(x => same(x.collectionName, r.title));
     if (hit) pick = tracks.find(t => same(t, hit.trackName)) || hit.trackName;
   }
   if (pick) { patch.start_with = pick; return { patch, fixed: true }; }
   patch.start_with = ''; return { patch, fixed: true, needPick: [...new Set(tracks)].slice(0, 30) };
+}
+
+// POST /api/pick — { items: [{ artist, title, tracks }] } → the song to start with, always one of the given tracks
+async function pickTracks(req, env) {
+  const b = await readJson(req);
+  const items = arr(b && b.items).slice(0, 8).map(x => ({ artist: clip(x && x.artist, 120), title: clip(x && x.title, 160), tracks: strList(x && x.tracks, 40, 160) })).filter(x => x.artist && x.title && x.tracks.length);
+  if (!items.length || !env.GEMINI_API_KEY) return json({ picks: [] });
+  if (await bump(env, 'pick:' + clientIp(req) + ':' + kstDay(), DAY) > 60) return json({ picks: [] });
+  let txt = '';
+  const ask = items.map((x, n) => `${n}. ${x.artist} — ${x.title}\n   실제 트랙리스트: ${x.tracks.join(' / ')}`).join('\n');
+  const q = await geminiStream(env, `다음 앨범마다 처음 듣는 사람에게 권할 대표곡 하나를 반드시 주어진 실제 트랙리스트 안에서 골라라.\n${ask}\nJSON 배열만 출력: [{"n":0,"track":"트랙리스트에 적힌 그대로"}]`, t => { txt += t; }, { models: ['gemini-3.5-flash-lite', 'gemini-3.6-flash'], hedgeMs: 3000, firstTextMs: 6000, totalMs: 9000 });
+  const out = q.ok ? parse(txt.replace(/```(?:json)?/g, '').trim().replace(/^[^[]*/, '').replace(/[^\]]*$/, '')) : null;
+  return json({ picks: items.map((x, n) => { const o = arr(out).find(v => v && +v.n === n); return (o && x.tracks.find(tr => same(tr, o.track))) || ''; }) });
 }
 
 // POST /api/recommend → a stream of JSON lines: profile, each rec as it is written, then fixes from the catalogue check
@@ -754,6 +769,7 @@ async function health(env, req) {
     version: 2, db, gemini_key: !!k,
     gemini_key_format: k ? (k.trim() !== k ? 'has_spaces' : /^AQ\./.test(k) ? 'AQ' : /^AIza/.test(k) ? 'AIza' : 'unknown') : null,
     pin_pepper: !!env.PIN_PEPPER, admins: admins(env).length, models: modelList(env),
+    deezer_here: new URL(req.url).searchParams.get('up') === '1' ? await deezerOpen() : undefined,
     catalogues: new URL(req.url).searchParams.get('up') === '1'
       ? Object.fromEntries(await Promise.all([
         ['apple', 'https://itunes.apple.com/search?media=music&entity=album&limit=1&term=radiohead'],
@@ -783,6 +799,8 @@ export async function onRequest(context) {
     if (route === 'charts' && m === 'GET') return await charts();
     if (route === 'feed' && m === 'GET') return await feedPage(req, env);
     if (route === 'cover' && m === 'GET') return await coverLookup(req);
+    if (route === 'exists' && m === 'GET') return await existsLookup(req);
+    if (route === 'pick' && m === 'POST') return await pickTracks(req, env);
     if (route === 'artist' && m === 'GET') return await artistLookup(req);
     if (route === 'search' && m === 'GET') return await searchLookup(req);
     if (route === 'img' && m === 'GET') return await img(req);
