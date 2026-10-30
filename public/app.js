@@ -107,11 +107,14 @@
   const AP = { log: [], coolUntil: 0 };
   function apple(url, prio = 'low', ms = 6000) {
     const t = Date.now(); AP.log = AP.log.filter(x => t - x < 60000);
-    const cap = prio === 'high' ? 19 : prio === 'mid' ? 15 : 8;
-    if (AP.log.length >= cap || (prio !== 'high' && t < AP.coolUntil)) return Promise.resolve(null);
+    const cap = prio === 'high' ? 18 : prio === 'mid' ? 14 : 3;
+    if (AP.log.length >= cap || (prio !== 'high' && t < AP.coolUntil)) { AP.denied = t; return Promise.resolve(null); }
     AP.log.push(t);
     return jsonp(url, ms).then(d => { if (!d) AP.coolUntil = Date.now() + 30000; return d; });
   }
+  // when the allowance frees up again (ms from now)
+  const appleSpare = () => { const t = Date.now(); return AP.log.filter(x => t - x < 60000).length < 10; };
+  const appleFreeIn = () => { const t = Date.now(); AP.log = AP.log.filter(x => t - x < 60000); return AP.log.length < 18 ? 0 : 60000 - (t - AP.log[0]) + 300; };
   const art600 = u => String(u || '').replace(/\/\d+x\d+bb\./, '/600x600bb.');
   const fromItunes = x => x.wrapperType === 'track'
     ? { type: 'track', title: x.trackName, artist: x.artistName, album: x.collectionName || '', year: String(x.releaseDate || '').slice(0, 4), genre: x.primaryGenreName || '', cover: art600(x.artworkUrl100), link: x.trackViewUrl || '' }
@@ -579,7 +582,7 @@
   }
 
   /* ---------------- search: type a couple of letters, tap to add (Apple Music + Deezer) ---------------- */
-  const S = { srv: new Map(), q: '', seq: 0, t: 0, view: '', rows: [], idx: -1, cache: new Map(), pool: new Map(), artists: new Map(), artistName: '', showSingles: false, chart: null, quick: null };
+  const S = { appleOk: new Set(), srv: new Map(), q: '', seq: 0, t: 0, view: '', rows: [], idx: -1, cache: new Map(), pool: new Map(), artists: new Map(), artistName: '', showSingles: false, chart: null, quick: null };
   const qEl = $('#music-q'), acEl = $('#music-ac');
   const inList = it => state.items.some(x => itemKey(x) === itemKey(it));
   const isCJK = s => /[぀-ヿ㐀-鿿가-힣]/.test(s);
@@ -630,14 +633,18 @@
   function sources(q) {
     let s = S.cache.get(q);
     if (!s) {
+      const store = /[가-힣]/.test(q) ? 'KR' : 'US', reuse = appleCovered(q);
       s = {
-        apple: apple(`https://itunes.apple.com/search?media=music&entity=song&limit=25&country=KR&term=${enc(q)}`, 'high', 5000),
-        // Apple's US store straight from the browser too: the fullest catalogue (the KR store lacks many older Western albums)
-        us: q.length >= 3 ? apple(`https://itunes.apple.com/search?media=music&entity=album&limit=15&country=US&term=${enc(q)}`, 'high', 5000) : Promise.resolve(null),
+        // Apple, in the store that fits the words: Hangul → Korea, anything else → US (the fullest catalogue).
+        // Skipped when an earlier, shorter search already answers it.
+        // Albums are asked for directly (a search for songs alone can miss an album: "soul survivor" songs all came from
+        // "Soul Survivor II"). Songs are a second request, made only while the minute's allowance has room to spare.
+        apple: reuse ? Promise.resolve({ results: [], reused: true }) : apple(`https://itunes.apple.com/search?media=music&entity=album&limit=25&country=${store}&term=${enc(q)}`, 'high', 5000).then(d => { if (d) S.appleOk.add(q); return d; }),
+        songs: reuse || !appleSpare() ? Promise.resolve(null) : apple(`https://itunes.apple.com/search?media=music&entity=song&limit=25&country=${store}&term=${enc(q)}`, 'high', 5000),
         al: dz(`search/album?limit=12&q=${enc(q)}`),
         tr: dz(`search/track?limit=15&q=${enc(q)}`),
         ar: dz(`search/artist?limit=5&q=${enc(q)}`),
-        // our server asks Apple's US store (the fullest catalogue; the KR store lacks many older Western albums) and Deezer
+        // our server asks MusicBrainz (albums Apple doesn't sell are there too)
         srv: q.length >= 3 ? new Promise(r => setTimeout(r, 450)).then(() => (S.q === q || qEl.value.trim() === q ? api('search?q=' + enc(q)).catch(() => null) : null)) : Promise.resolve(null),
       };
       S.cache.set(q, s); if (S.cache.size > 80) S.cache.delete(S.cache.keys().next().value);
@@ -648,7 +655,7 @@
     const rank = new Map(), bump = (it, r) => { const k = ck(it); rank.set(k, (rank.get(k) || 0) + r); };
     const add = (list, w) => list.forEach((it, i, a) => { const m = remember(it); if (m) bump(m, w * (1 - i / Math.max(8, a.length))); });
     if (got.apple) add(arr(got.apple.results).flatMap(fromApple), 2);
-    if (got.us) add(arr(got.us.results).flatMap(fromApple), 2);
+    if (got.songs) add(arr(got.songs.results).flatMap(fromApple), 1.6);
     if (got.al) add(arr(got.al.data).map(fromDzAlbum), 1.6);
     if (got.tr) add(arr(got.tr.data).flatMap(fromDzTrack), 1.2);
     if (got.srv) add(arr(got.srv.items).map(x => ({ ...x })), 1.7);   // MusicBrainz albums through our server
@@ -732,12 +739,23 @@
       if (seq === S.seq && S.view === 'search') drawSearch(q, merge(q, got), left > 0);
     })));
     // a catalogue that didn't answer (busy, rate-limited) is asked again next time instead of being remembered as empty
-    const failed = Object.entries(got).filter(([k, d]) => !d && ['apple', 'us', 'srv'].includes(k) && !(k === 'us' && q.length < 3)).map(([k]) => k);
+    const failed = Object.entries(got).filter(([k, d]) => !d && ['apple', 'srv'].includes(k)).map(([k]) => k);
     if (failed.length && S.cache.get(q) === s) S.cache.delete(q);
-    const appleDown = !got.apple && !got.us && !(got.srv && arr(got.srv.apple).length);
-    if (appleDown && seq === S.seq && S.view === 'search') {
-      const f = acEl.querySelector('.ac-foot span'); if (f) f.textContent = 'Apple Music이 잠시 응답하지 않습니다. 잠깐 뒤 다시 입력해 보세요';
+    if (!got.apple && seq === S.seq && S.view === 'search') {
+      const wait = Math.max(appleFreeIn(), Date.now() < AP.coolUntil ? AP.coolUntil - Date.now() : 0, 4000);
+      const f = acEl.querySelector('.ac-foot span');
+      if (f) f.textContent = `Apple Music은 1분에 20번까지만 검색됩니다. MusicBrainz 결과를 먼저 보여 드리고, ${Math.ceil(wait / 1000)}초 뒤 Apple에서 다시 찾습니다`;
+      clearTimeout(S.retryT);
+      S.retryT = setTimeout(() => { if (S.q === q && S.view === 'search' && qEl.value.trim() === q) runSearch(q); }, wait);
     }
+  }
+  // an earlier, shorter search ("nirvana") whose Apple results already contain enough for this one ("nirvana nev")
+  function appleCovered(q) {
+    let base = '';
+    S.appleOk.forEach(p => { if (p.length >= 3 && q.startsWith(p) && p.length > base.length) base = p; });
+    if (!base) return false;
+    const r = results(q, null);
+    return r.albums.length + r.songs.length >= 3;
   }
   // one artist's albums and best-known songs
   async function artistData(a) {
@@ -745,9 +763,9 @@
     if (!a.p) a.p = (async () => {
       const srvP = api(`artist?name=${enc(a.name)}`).catch(() => null);
       const [al, alUS, so, dzA] = await Promise.all([
-        apple(`https://itunes.apple.com/search?media=music&entity=album&attribute=artistTerm&limit=80&country=KR&term=${enc(a.name)}`, a.bg ? 'low' : 'high'),
-        apple(`https://itunes.apple.com/search?media=music&entity=album&attribute=artistTerm&limit=100&country=US&term=${enc(a.name)}`, a.bg ? 'low' : 'high'),
-        a.bg ? Promise.resolve(null) : apple(`https://itunes.apple.com/search?media=music&entity=song&attribute=artistTerm&limit=25&country=KR&term=${enc(a.name)}`, 'high'),
+        Promise.resolve(null),
+        apple(`https://itunes.apple.com/search?media=music&entity=album&attribute=artistTerm&limit=100&country=${/[가-힣]/.test(a.name) ? 'KR' : 'US'}&term=${enc(a.name)}`, a.bg ? 'low' : 'high'),
+        a.bg ? Promise.resolve(null) : apple(`https://itunes.apple.com/search?media=music&entity=song&attribute=artistTerm&limit=25&country=${/[가-힣]/.test(a.name) ? 'KR' : 'US'}&term=${enc(a.name)}`, 'high'),
         a.dzId ? Promise.all([dz(`artist/${a.dzId}/albums?limit=60`), dz(`artist/${a.dzId}/top?limit=10`)]) : Promise.resolve([null, null]),
       ]);
       const mine = it => core(it.artist) === key || looseEq(it.artist, a.name);
@@ -835,7 +853,7 @@
     if (q.length < 2 && !isCJK(q)) { hideAc(); return; }
     // what we already have answers at once; the catalogues fill in a moment later
     S.seq++; S.view = 'search'; drawSearch(q, null, true);
-    S.t = setTimeout(() => runSearch(q), 220);
+    S.t = setTimeout(() => runSearch(q), 380);
   }
   function toggleRow(n) {
     const r = S.rows[n]; if (!r) return;

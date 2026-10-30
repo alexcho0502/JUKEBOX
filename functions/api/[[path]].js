@@ -402,7 +402,7 @@ async function searchLookup(req) {
   if (q.length < 2) return json({ items: [] });
   return cached(req, 3600, async () => {
     const query = `(releasegroup:(${q}) OR artist:(${q})) AND (primarytype:album OR primarytype:ep)`;
-    const s = await getJson(`https://musicbrainz.org/ws/2/release-group?fmt=json&limit=25&query=${encodeURIComponent(query)}`, { 'user-agent': UA, 'x-priority': 'high' }, 86400);
+    const s = await getJson(`https://musicbrainz.org/ws/2/release-group?fmt=json&limit=40&query=${encodeURIComponent(query)}`, { 'user-agent': UA, 'x-priority': 'high' }, 86400);
     return { items: arr(s && s['release-groups']).filter(rg => (rg.score || 0) >= 40).map(rg => fromMbRg(rg)).filter(x => x.title && x.artist), partial: !s };
   });
 }
