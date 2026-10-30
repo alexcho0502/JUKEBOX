@@ -198,14 +198,16 @@ async function profile(req, env, key) {
   if (!user) return fail(404, 'no_user', '이 유저는 더 이상 없습니다.');
   const me = await currentUser(req, env);
   if (me && me.id !== user.id) await env.DB.prepare('INSERT OR IGNORE INTO visits (target_id, visitor_id, day) VALUES (?, ?, ?)').bind(user.id, me.id, kstDay()).run();
-  const [lib, msgs] = await env.DB.batch([
+  const [lib, msgs, posts] = await env.DB.batch([
     env.DB.prepare('SELECT items FROM library WHERE user_id = ?').bind(user.id),
     env.DB.prepare('SELECT id, from_user_id, body, created_at FROM messages WHERE to_user_id = ? ORDER BY created_at DESC LIMIT 40').bind(user.id),
+    env.DB.prepare("SELECT * FROM posts WHERE user_id = ? AND kind = 'analysis' ORDER BY created_at DESC, id DESC LIMIT 10").bind(user.id),
   ]);
   return json({
     user: { key: keyOf(user.id), username: user.nickname, createdAt: user.created_at },
     library: lib.results[0] ? arr(parse(lib.results[0].items)) : [],
     messages: msgs.results.map(m => ({ id: 'm' + m.id, from: keyOf(m.from_user_id), body: m.body, createdAt: m.created_at })),
+    analyses: posts.results.map(postOut),
   });
 }
 async function postMessage(req, env, me, key) {
@@ -247,7 +249,7 @@ async function adminUnlock(env, me, key) {
 }
 
 /* ---------------- catalogue helpers (Apple iTunes Search + MusicBrainz) ---------------- */
-const norm = t => String(t || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '')
+const norm = t => String(t || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/&/g, ' and ').replace(/[’'`]/g, '')
   .replace(/\(.*?\)|\[.*?\]|\s-\s(single|ep)$|feat\..*$|-\s*(\d{4}\s*)?remaster.*$/g, '').replace(/^the\s+/, '').replace(/[^a-z0-9가-힣]+/g, '');
 const same = (a, b) => { const x = norm(a), y = norm(b); return !!x && !!y && (x === y || (x.length > 4 && y.length > 4 && (x.includes(y) || y.includes(x)))); };
 const art600 = u => okUrl(String(u || '').replace(/\/\d+x\d+bb\./, '/600x600bb.'), COVER_HOST);
@@ -267,13 +269,6 @@ async function itunes(params, country = 'US') {
   Object.entries({ media: 'music', limit: '8', country, ...params }).forEach(([k, v]) => u.searchParams.set(k, v));
   const d = await getJson(u.toString()); return d ? arr(d.results) : [];
 }
-async function findAlbum(artist, title) {
-  for (const c of ['US', 'KR']) {
-    const hit = (await itunes({ term: `${artist} ${title}`, entity: 'album' }, c)).find(x => same(x.artistName, artist) && same(x.collectionName, title));
-    if (hit) return { id: hit.collectionId, country: c, cover: art600(hit.artworkUrl100), link: okUrl(hit.collectionViewUrl, LINK_HOST) };
-  }
-  return null;
-}
 async function albumTracks(album) {
   const u = new URL('https://itunes.apple.com/lookup'); u.searchParams.set('id', album.id); u.searchParams.set('entity', 'song'); u.searchParams.set('country', album.country);
   const d = await getJson(u.toString());
@@ -282,8 +277,9 @@ async function albumTracks(album) {
 async function mbTracks(artist, title) {
   const q = `release:"${title.replace(/"/g, '')}" AND artist:"${artist.replace(/"/g, '')}"`;
   const s = await getJson(`https://musicbrainz.org/ws/2/release?fmt=json&limit=5&query=${encodeURIComponent(q)}`, { 'user-agent': UA }, 604800);
-  const rel = s && arr(s.releases).find(r => same(r.title, title) && arr(r['artist-credit']).some(a => same(a.name, artist)));
-  if (!rel) return null;
+  if (!s) return null;
+  const rel = arr(s.releases).find(r => same(r.title, title) && arr(r['artist-credit']).some(a => same(a.name, artist)));
+  if (!rel) return {};
   const d = await getJson(`https://musicbrainz.org/ws/2/release/${rel.id}?fmt=json&inc=recordings`, { 'user-agent': UA }, 604800);
   const tracks = d ? arr(d.media).flatMap(m => arr(m.tracks).map(t => t.title)) : [];
   const rg = rel['release-group'] && rel['release-group'].id;
@@ -293,14 +289,16 @@ async function mbTracks(artist, title) {
 async function dzAlbum(artist, title) {
   const q = `artist:"${artist.replace(/"/g, '')}" album:"${title.replace(/"/g, '')}"`;
   const d = await getJson(`https://api.deezer.com/search/album?limit=8&q=${encodeURIComponent(q)}`);
-  const hit = d && arr(d.data).find(x => same(x.artist && x.artist.name, artist) && same(x.title, title));
-  return hit ? { id: hit.id, cover: okUrl(hit.cover_xl || hit.cover_big, COVER_HOST), link: okUrl(hit.link, LINK_HOST) } : null;
+  if (!d) return null;
+  const hit = arr(d.data).find(x => same(x.artist && x.artist.name, artist) && same(x.title, title));
+  return hit ? { id: hit.id, cover: okUrl(hit.cover_xl || hit.cover_big, COVER_HOST), link: okUrl(hit.link, LINK_HOST) } : {};
 }
 async function dzTracks(id) { const d = await getJson(`https://api.deezer.com/album/${id}/tracks?limit=100`); return d ? arr(d.data).map(t => t.title) : []; }
 async function findSong(artist, title) {
-  const list = (await itunes({ term: `${artist} ${title}`, entity: 'song', limit: '15' })).filter(x => same(x.artistName, artist) && same(x.trackName, title));
+  const raw = await itunesRaw({ term: `${artist} ${title}`, entity: 'song', limit: '15' });
+  const list = arr(raw).filter(x => same(x.artistName, artist) && same(x.trackName, title));
   const original = list.find(x => !/greatest|best of|hits|collection|anthology|essential|live/i.test(x.collectionName)) || list[0];
-  return { albums: list.map(x => x.collectionName), first: original ? original.collectionName : '', cover: original ? art600(original.artworkUrl100) : '', link: original ? okUrl(original.trackViewUrl, LINK_HOST) : '' };
+  return { answered: !!raw, albums: list.map(x => x.collectionName), first: original ? original.collectionName : '', cover: original ? art600(original.artworkUrl100) : '', link: original ? okUrl(original.trackViewUrl, LINK_HOST) : '' };
 }
 
 // responses the browser may keep for a while (and Cloudflare caches at the edge)
@@ -322,7 +320,7 @@ async function coverLookup(req) {
     for (const c of ['US', 'KR']) {
       const list = seen(await itunesRaw({ term: `${artist} ${title}`, entity: track ? 'song' : 'album', limit: '10' }, c));
       const hit = arr(list).find(x => same(x.artistName, artist) && same(track ? x.trackName : x.collectionName, title));
-      if (hit) return { cover: art600(hit.artworkUrl100), from: 'apple' };
+      if (hit) return { cover: art600(hit.artworkUrl100), from: 'apple', year: String(hit.releaseDate || '').slice(0, 4), genre: hit.primaryGenreName || '', link: okUrl(track ? hit.trackViewUrl : hit.collectionViewUrl, LINK_HOST) };
     }
     const q = track ? `artist:"${artist.replace(/"/g, '')}" track:"${title.replace(/"/g, '')}"` : `artist:"${artist.replace(/"/g, '')}" album:"${title.replace(/"/g, '')}"`;
     const d = seen(await getJson(`https://api.deezer.com/search/${track ? 'track' : 'album'}?limit=10&q=${encodeURIComponent(q)}`));
@@ -427,7 +425,7 @@ summary, why, detail을 포함한 모든 한국어 문장은 존댓말 합쇼체
 '~한다', '~이다', '~했다' 같은 반말 평서문과 '~해요', '~예요' 체는 절대 쓰지 마라.`;
 function buildPrompt(items, o, more) {
   const list = items.map((it, i) => `${i + 1}. [${it.type === 'track' ? '곡' : '앨범'}] ${it.artist} — ${it.title}${it.year ? ' (' + it.year + ')' : ''}${it.rating ? ` — 별점 ${it.rating}/5` : ''}`).join('\n');
-  const n = [3, 5, 7].includes(+o.n) ? +o.n : 5;
+  const n0 = [3, 5, 7].includes(+o.n) ? +o.n : 5, n = n0 + (n0 >= 5 ? 2 : 1);  // spares: anything the catalogues don't know is dropped
   const fmt = { both: '앨범과 곡을 섞어서', album: '앨범만', track: '곡(싱글 또는 수록곡)만' }[o.format] || '앨범과 곡을 섞어서';
   const axes = strList(o.axes, 8, 20).filter(a => AXES.includes(a)), region = strList(o.region, 6, 20);
   const f = int(o.eraFrom, 1900, 2030, 0), t = int(o.eraTo, 1900, 2030, 0);
@@ -461,7 +459,10 @@ ${list}
 [요청]
 ${lines}
 
-[사실 확인 — 특히 과거 작품은 꼼꼼하게]
+[사실 확인 — 가장 중요]
+- 추천한 작품은 서버가 Apple Music·Deezer 카탈로그에서 하나하나 찾아본다. 찾지 못한 작품은 지어낸 것으로 보고 버린다.
+- 그러니 제목이 정확히 떠오르지 않는 작품, 존재 여부가 애매한 작품은 절대 쓰지 마라. 숨은 작품을 추천할 때도 실제로 발매된 것을 확실히 아는 것만 써라.
+- 아티스트의 다른 앨범 제목, 수록곡 제목, 다른 아티스트의 앨범 제목을 섞어 새 제목을 만들지 마라.
 ① 실제로 존재하는 작품인가 ② 아티스트와 제목 철자가 원어 표기 그대로인가 ③ 연도가 재발매·리마스터가 아닌 최초 발매 연도인가 ④ 곡이 그 앨범에 실제로 수록됐는가 ⑤ 연결 근거로 든 사람·레이블이 실제로 참여했는가. 하나라도 확신이 없으면 그 작품은 빼라.
 ⑥ start_with는 반드시 '바로 그 앨범'의 실제 트랙리스트에 있는 곡이어야 한다. 같은 아티스트의 다른 앨범에 실린 곡, 그 아티스트가 다른 앨범에서 커버한 곡, 다른 아티스트의 원곡은 안 된다. 확실하지 않으면 빈 문자열.
 ⑦ 곡을 추천할 때 album은 그 곡이 처음 실린 '그 아티스트의' 앨범이어야 한다. 확실하지 않으면 빈 문자열.
@@ -492,7 +493,7 @@ const modelList = (env, deep = false) => {
   const extra = String(env.GEMINI_FALLBACKS ?? 'gemini-3.5-flash-lite').split(',').map(s => s.trim()).filter(Boolean);
   return [...new Set(deep ? [deepModel(env), fastModel(env), ...extra] : [fastModel(env), ...extra, deepModel(env)])];
 };
-const thinkingFor = m => (/3\.8-flash$/.test(m) ? 'low' : /3\.6-flash$|^gemini-3-flash/.test(m) ? 'minimal' : '');
+const thinkingFor = m => (/3\.8-flash$|3\.6-flash$/.test(m) ? 'low' : /^gemini-3-flash/.test(m) ? 'minimal' : '');
 async function* sse(body, onAny) {
   const reader = body.getReader(), dec = new TextDecoder(); let buf = '';
   for (;;) {
@@ -522,7 +523,7 @@ async function openModel(key, model, prompt, signal, notes) {
     const url = api === 'interactions' ? `${base}/interactions` : `${base}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
     const body = api === 'interactions'
       ? { model, input: prompt, stream: true, ...(think ? { generation_config: { thinking_level: think } } : {}) }
-      : { contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { temperature: 0.8, ...(think ? { thinkingConfig: { thinkingLevel: think } } : {}) } };
+      : { contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { temperature: 0.4, ...(think ? { thinkingConfig: { thinkingLevel: think } } : {}) } };
     let r;
     try { r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': key, ...(api === 'interactions' ? { 'Api-Revision': '2026-05-20' } : {}) }, body: JSON.stringify(body), signal }); }
     catch (e) { notes.push(`${model}: ${signal.aborted ? '시간 초과' : '응답 없음'}`); return { fail: 'net' }; }
@@ -537,7 +538,7 @@ async function openModel(key, model, prompt, signal, notes) {
   return { fail: 'endpoint' };
 }
 async function geminiStream(env, prompt, onText, opt = {}) {
-  const { hedgeMs = 6000, firstTextMs = 22000, idleMs = 14000, totalMs = 75000, deep = false, models: only } = opt;
+  const { hedgeMs = 12000, firstTextMs = 25000, idleMs = 14000, totalMs = 75000, deep = false, models: only } = opt;
   const key = String(env.GEMINI_API_KEY || '').trim(), models = only || modelList(env, deep), notes = [];
   let quota = 0, next = 0, live = 0, winner = null, finished = false, hedgeT = 0, totalT = 0;
   const runs = [];
@@ -609,6 +610,13 @@ function recLine(line) {
 }
 
 // check one recommendation against Apple's catalogue (MusicBrainz as a fallback) and return what changed
+// check one recommendation against the catalogues and return what changed.
+// missing: at least two catalogues answered and none of them knows this work → it's dropped (spares and a top-up replace it)
+async function appleAlbum(artist, title, c) {
+  const list = await itunesRaw({ term: `${artist} ${title}`, entity: 'album', limit: '10' }, c);
+  const hit = arr(list).find(x => same(x.artistName, artist) && same(x.collectionName, title));
+  return hit ? { id: hit.collectionId, country: c, cover: art600(hit.artworkUrl100), link: okUrl(hit.collectionViewUrl, LINK_HOST), answered: true } : { answered: !!list };
+}
 async function verifyOne(r, budget) {
   const patch = {}; let fixed = false;
   const take = n => { if (budget.n < n) return false; budget.n -= n; return true; };
@@ -616,31 +624,45 @@ async function verifyOne(r, budget) {
     if (!take(1)) return { patch, fixed };
     const s = await findSong(r.artist, r.title);
     if (s.cover) patch.cover = s.cover; if (s.link) patch.link = s.link;
+    let dzAnswered = false, dzFound = false;
     if (!s.cover && take(1)) {
-      const d = await getJson(`https://api.deezer.com/search/track?limit=8&q=${encodeURIComponent(`artist:"${r.artist.replace(/"/g, '')}" track:"${r.title.replace(/"/g, '')}"`)}`);
+      const d = await getJson(`https://api.deezer.com/search/track?limit=10&q=${encodeURIComponent(`artist:"${r.artist.replace(/"/g, '')}" track:"${r.title.replace(/"/g, '')}"`)}`);
+      dzAnswered = !!d;
       const h = d && arr(d.data).find(x => same(x.artist && x.artist.name, r.artist) && same(x.title, r.title));
-      if (h && h.album) { const c = okUrl(h.album.cover_xl || h.album.cover_big, COVER_HOST); if (c) patch.cover = c; }
+      if (h && h.album) { dzFound = true; const c = okUrl(h.album.cover_xl || h.album.cover_big, COVER_HOST); if (c) patch.cover = c; }
     }
+    if (!s.albums.length && !dzFound && s.answered && dzAnswered) return { patch, fixed, missing: true };
     if (s.albums.length && !s.albums.some(a => same(a, r.album)) && s.first && s.first !== r.album) { patch.album = s.first; fixed = true; }
     return { patch, fixed };
   }
-  if (!take(2)) return { patch, fixed };
-  const al = await findAlbum(r.artist, r.title);
+  if (!take(1)) return { patch, fixed };
+  let al = await appleAlbum(r.artist, r.title, 'US');
   let tracks = [];
-  if (al) {
+  const usAnswered = al.answered;
+  let dz = null, krAnswered = false;
+  if (!al.id && take(1)) dz = await dzAlbum(r.artist, r.title);                     // Deezer
+  if (!al.id && !(dz && dz.id) && take(1)) { const kr = await appleAlbum(r.artist, r.title, 'KR'); krAnswered = kr.answered; if (kr.id) al = kr; }
+  if (al.id) {
     if (al.cover) patch.cover = al.cover; if (al.link) patch.link = al.link;
     if (take(1)) tracks = await albumTracks(al);
+  } else if (dz && dz.id) {
+    if (dz.cover) patch.cover = dz.cover;
+    if (take(1)) tracks = await dzTracks(dz.id);
   } else {
-    const dz = take(1) ? await dzAlbum(r.artist, r.title) : null;
-    if (dz) { if (dz.cover) patch.cover = dz.cover; if (take(1)) tracks = await dzTracks(dz.id); }
-    if (!tracks.length && take(2)) { const mb = await mbTracks(r.artist, r.title); if (mb) { tracks = mb.tracks; if (mb.cover && !patch.cover) patch.cover = mb.cover; } }
+    const appleAnswered = usAnswered || krAnswered;
+    if (dz && appleAnswered) return { patch, fixed, missing: true };               // Apple and Deezer both answered: nobody has it
+    if (take(2)) {
+      const mb = await mbTracks(r.artist, r.title);
+      if (mb && mb.tracks) { tracks = mb.tracks; if (mb.cover) patch.cover = mb.cover; }
+      else if (mb && (appleAnswered || dz)) return { patch, fixed, missing: true };
+    }
   }
   if (!tracks.length) return { patch, fixed };
   const exact = r.start_with && tracks.find(t => same(t, r.start_with));
   if (exact) { if (exact !== r.start_with) patch.start_with = exact; return { patch, fixed }; }
   // not on this album: take the album's most popular song (Apple ranks song results by popularity)
   let pick = '';
-  if (al && take(1)) {
+  if (al.id && take(1)) {
     const songs = await itunes({ term: r.artist, entity: 'song', limit: '50' }, al.country);
     const hit = songs.find(x => x.collectionId === al.id) || songs.find(x => same(x.collectionName, r.title));
     if (hit) pick = tracks.find(t => same(t, hit.trackName)) || hit.trackName;
@@ -662,14 +684,15 @@ async function recommend(req, env) {
   const w = writable.getWriter(), te = new TextEncoder();
   const send = o => w.write(te.encode(JSON.stringify(o) + '\n')).catch(() => {});
   (async () => {
-    const budget = { n: 34 }, checks = [], recs = [], seen = new Set(), picks = [];
-    let fixed = 0;
+    const budget = { n: 36 }, checks = [], recs = [], seen = new Set(), picks = [], gone = [], t0 = now();
+    const want = [3, 5, 7].includes(+(b && b.opts && b.opts.n)) ? +b.opts.n : 5;
+    let fixed = 0, dropped = 0, profiled = false;
     const onLine = line => {
       const x = recLine(line); if (!x) return;
-      if (x.profile) { send({ t: 'profile', profile: x.profile }); return; }
+      if (x.profile) { if (!profiled) { profiled = true; send({ t: 'profile', profile: x.profile }); } return; }
       const r = x.rec, k = (r.artist + '|' + r.title).toLowerCase(); if (seen.has(k)) return; seen.add(k);
       const i = recs.push(r) - 1; send({ t: 'rec', i, rec: r });
-      checks.push(verifyOne(r, budget).then(({ patch, fixed: f, needPick }) => { if (f) fixed++; if (needPick) picks.push({ i, r, tracks: needPick }); if (Object.keys(patch).length) send({ t: 'fix', i, patch }); }).catch(() => {}));
+      checks.push(verifyOne(r, budget).then(({ patch, fixed: f, needPick, missing }) => { if (missing) { dropped++; gone.push(`${r.artist} — ${r.title}`); send({ t: 'drop', i }); return; } if (f) fixed++; if (needPick) picks.push({ i, r, tracks: needPick }); if (Object.keys(patch).length) send({ t: 'fix', i, patch }); }).catch(() => {}));
     };
     try {
       const deep = !!(b && b.opts && b.opts.deep);
@@ -677,6 +700,14 @@ async function recommend(req, env) {
       if (!res.ok) { if (!recs.length) await send({ t: 'error', ...res.error, notes: res.notes }); }
       else if (!recs.length) await send({ t: 'error', code: 'ai_format', message: '추천 결과를 읽지 못했습니다. 다시 시도해 주세요.' });
       await Promise.race([Promise.all(checks), new Promise(r => setTimeout(r, 8000))]);
+      // too many were made up: ask once more for real, well-documented works to fill the gap
+      const short = want - (recs.length - dropped);
+      if (res.ok && short > 0 && now() - t0 < 50000) {
+        const extra = `\n\n[추가 요청 — 반드시 지킬 것]\n- 다음 작품은 Apple Music·Deezer에서 찾을 수 없어 실존하지 않는 것으로 보고 뺐다: ${gone.join('; ')}\n- 이미 추천한 작품도 다시 쓰지 마라: ${recs.map(x => `${x.artist} — ${x.title}`).join('; ')}\n- 대신 음원 사이트에 확실히 있는 잘 알려진 정규 앨범이나 곡만 ${short + 1}개 더 추천하라. 프로필 줄은 쓰지 말고 rec 줄만 써라.`;
+        const before = checks.length;
+        await geminiStream(env, prompt + extra, objects(onLine), { hedgeMs: 8000, firstTextMs: 20000, totalMs: 35000 });
+        await Promise.race([Promise.all(checks.slice(before)), new Promise(r => setTimeout(r, 8000))]);
+      }
       if (picks.length) {
         // albums only MusicBrainz knows: one quick call on the lightest model chooses a song from the real tracklist
         const ask = picks.map((x, n) => `${n}. ${x.r.artist} — ${x.r.title}\n   실제 트랙리스트: ${x.tracks.join(' / ')}`).join('\n');
@@ -685,7 +716,7 @@ async function recommend(req, env) {
         const out = q.ok ? parse(txt.replace(/```(?:json)?/g, '').trim().replace(/^[^[]*/, '').replace(/[^\]]*$/, '')) : null;
         picks.forEach((x, n) => { const o = arr(out).find(v => v && +v.n === n); const t = o && x.tracks.find(tr => same(tr, o.track)); if (t) send({ t: 'fix', i: x.i, patch: { start_with: t } }); });
       }
-      if (recs.length) await send({ t: 'done', fixed, model: res.model || '' });
+      if (recs.length) await send({ t: 'done', fixed, dropped, model: res.model || '' });
     } catch (e) { await send({ t: 'error', code: 'server_error', message: '서버에서 문제가 생겼습니다. 잠시 후 다시 시도해 주세요.' }); }
     finally { await w.close().catch(() => {}); }
   })();

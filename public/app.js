@@ -462,7 +462,7 @@
       else if (!opts.quiet) toast('이미 목록에 있습니다');
     }
     renderList(); save(); scheduleLibSync();
-    const need = added.filter(x => !arr(x.colors).length || !x.genre);
+    const need = added.filter(x => !arr(x.colors).length || !x.genre || !x.year || !x.cover);
     if (need.length) enrich(need);
     return added.length;
   }
@@ -517,6 +517,11 @@
         if (!it.cover) {
           const hit = (await itunesSearch(`${it.artist} ${it.title}`, it.type, 8)).find(x => looseEq(x.artist, it.artist) && looseEq(x.title, it.title)) || null;
           if (hit) { it.cover = hit.cover; it.link = hit.link; if (!it.year) it.year = hit.year; if (!it.genre) it.genre = hit.genre; if (hit.album && it.type === 'track') it.album = hit.album; }
+        }
+        if (!it.cover || !it.year) {
+          // the browser couldn't reach Apple (or found nothing): ask through our server
+          const s = await api(`cover?type=${it.type === 'track' ? 'track' : 'album'}&artist=${enc(it.artist)}&title=${enc(it.title)}`).catch(() => null);
+          if (s) { if (s.cover && !it.cover) it.cover = s.cover; if (s.year && !it.year) it.year = s.year; if (s.genre && !it.genre) it.genre = s.genre; if (s.link && !it.link) it.link = s.link; }
         }
         const x = await catalogInfo(it);
         if (x.year) it.year = x.year;
@@ -879,7 +884,7 @@
     }
     if (R.profile) root.append(profileBlock(R.profile));
     const sec = document.createElement('section'); sec.style.cssText = 'display:grid;gap:16px';
-    sec.innerHTML = `<div class="sec-head"><h3>RECOMMENDED</h3><div class="sec-tools"><button class="btn btn-ghost" type="button" data-copy="list">목록 복사</button><button class="btn btn-ghost" type="button" data-copy="full">이유까지 복사</button></div></div><div class="cols"><span>NO ITEM</span><span>MATCH SCORE / 100</span></div><div class="cards" id="music-recs"></div>`;
+    sec.innerHTML = `<div class="sec-head"><h3>RECOMMENDED</h3></div><div class="cols"><span>NO ITEM</span><span>MATCH SCORE / 100</span></div><div class="cards" id="music-recs"></div>`;
     root.append(sec);
     R.recs.forEach((r, i) => $('#music-recs').append(recCard(r, i)));
     const ms = R.recs.map(r => +r.match || 0).filter(Boolean);
@@ -912,7 +917,8 @@
     const ctl = runCtl = new AbortController();
     const tick = setInterval(() => { const e = $('#music-status .el'); if (e) e.textContent = elapsed(); }, 1000);
     let late = false; const guard = setTimeout(() => { late = true; ctl.abort(); }, 95000);
-    const idx = new Map(); let got = 0, failed = null, done = null;
+    const byI = new Map(), spare = [], want = Math.max(1, +O.n || 5); let got = 0, dropped = 0, failed = null, done = null;
+    const showRec = r => { const at = state.results.recs.push(r) - 1; got++; ensureSec(); $('#music-recs').append(recCard(r, at, { fresh: true })); };
     const ensureSec = () => {
       if ($('#music-recs')) return;
       const sec = document.createElement('section');
@@ -926,14 +932,26 @@
         $('#music-status').after(profileBlock(ev.profile));
       } else if (ev.t === 'rec') {
         const r = ev.rec, k = recKey(r);
-        if (state.results.recs.some(x => recKey(x) === k)) return;
-        const at = state.results.recs.push(r) - 1; idx.set(ev.i, at); got++;
-        ensureSec(); $('#music-recs').append(recCard(r, at, { fresh: true }));
+        if (state.results.recs.some(x => recKey(x) === k) || spare.some(x => recKey(x.r) === k)) return;
+        byI.set(ev.i, r);
+        if (got >= want) { spare.push({ i: ev.i, r }); return; }   // spares wait unseen in case one gets dropped
+        showRec(r);
         setStatus(`${got}개가 도착했습니다 · 실제 수록곡과 커버를 확인하고 있습니다`, true); save();
       } else if (ev.t === 'fix') {
-        const at = idx.get(ev.i), r = state.results.recs[at]; if (!r) return;
+        const r = byI.get(ev.i); if (!r) return;
         Object.assign(r, ev.patch);
-        const old = $('#music-recs') && $('#music-recs').children[at]; if (old) old.replaceWith(recCard(r, at));
+        const at = state.results.recs.indexOf(r);
+        const old = at >= 0 && $('#music-recs') && $('#music-recs').children[at]; if (old) old.replaceWith(recCard(r, at));
+        save();
+      } else if (ev.t === 'drop') {
+        // no catalogue knows this one (likely a made-up title): take it out, bring in a spare
+        const r = byI.get(ev.i); if (!r) return;
+        dropped++;
+        const sp = spare.findIndex(x => x.r === r); if (sp >= 0) { spare.splice(sp, 1); return; }
+        const at = state.results.recs.indexOf(r); if (at < 0) return;
+        state.results.recs.splice(at, 1); got--;
+        const box = $('#music-recs'); if (box) { box.innerHTML = ''; state.results.recs.forEach((x, n) => box.append(recCard(x, n))); }
+        const next = spare.shift(); if (next) showRec(next.r);
         save();
       } else if (ev.t === 'done') done = ev;
       else if (ev.t === 'error') failed = ev;
@@ -959,7 +977,7 @@
     else if (failed && !got) setStatus(failed.message || '추천을 받지 못했습니다. 다시 시도해 주세요.', false);
     else if (!got) setStatus('새로운 추천을 받지 못했습니다. 설정을 바꿔 다시 시도해 주세요.', false);
     else {
-      setStatus((done && done.fixed > 0 ? `수록곡 확인에서 ${done.fixed}건을 바로잡았습니다. ` : '') + `${got}개를 추천했습니다. “취향 맞음”을 누르면 다음 추천에 반영되고${auth ? ' Community에도 공유됩니다.' : ', 로그인하면 Community에 공유됩니다.'}`, false);
+      setStatus((dropped ? `음원 사이트에서 확인되지 않은 ${dropped}개는 빼고 다른 작품으로 채웠습니다. ` : '') + (done && done.fixed > 0 ? `수록곡 확인에서 ${done.fixed}건을 바로잡았습니다. ` : '') + `${got}개를 추천했습니다. “취향 맞음”을 누르면 다음 추천에 반영되고${auth ? ' Community에도 공유됩니다.' : ', 로그인하면 Community에 공유됩니다.'}`, false);
       if (auth && $('#music-share').checked) postAnalysis(state.results.recs.slice(before), more ? null : state.results.profile);
       else if (!auth && $('#music-share').checked) {
         pendingShare = { recs: state.results.recs.slice(before), profile: more ? null : state.results.profile };
@@ -1270,6 +1288,7 @@
     if (kind === 'feed') { const f = allFeed().find(x => x.id === a); const it = f && arr(f.items)[+b]; return it ? { item: it, by: f.uname, at: f.createdAt, kind: f.kind } : null; }
     if (kind === 'pick') { const p = live.picks.find(x => x.id === a); return p && p.item ? { item: p.item, by: p.uname, at: p.createdAt, kind: 'pick' } : null; }
     if (kind === 'lib') { const it = profLib[+a]; return it ? { item: it } : null; }
+    if (kind === 'pa') { const f = modalCtx && arr(modalCtx.analyses).find(x => x.id === a); const it = f && arr(f.items)[+b]; return it ? { item: it, by: f.uname, at: f.createdAt, kind: 'analysis' } : null; }
     return null;
   }
   function detailHTML(ctx) {
@@ -1308,6 +1327,10 @@
     ctx.loading = false;
     if (modalCtx && modalCtx.ref === ref) $('#modal-body').innerHTML = detailHTML(ctx);
   }
+  $('#modal-body').addEventListener('click', e => {
+    const t = e.target.closest('[data-ptab]');
+    if (t && modalCtx && modalCtx.kind === 'profile') { modalCtx.tab = t.dataset.ptab; renderProfileModal(); }
+  });
   $('#modal-body').addEventListener('click', async e => {
     if (!modalCtx) return;
     if (modalCtx.kind === 'detail') {
@@ -1322,15 +1345,15 @@
   });
   async function openProfile(key) {
     setSide(false);
-    modalCtx = { kind: 'profile', key, lib: null, messages: [] };
+    modalCtx = { kind: 'profile', key, lib: null, messages: [], analyses: null, tab: 'lib' };
     $('#modal').hidden = false; renderProfileModal(); $('#modal-x').focus();
     try {
       const d = await api('users/' + enc(key));
       if (!modalCtx || modalCtx.key !== key) return;
-      modalCtx.lib = arr(d.library); modalCtx.messages = arr(d.messages);
+      modalCtx.lib = arr(d.library); modalCtx.messages = arr(d.messages); modalCtx.analyses = arr(d.analyses);
       renderProfileModal();
       if (auth && auth.key !== key) refresh();
-    } catch (e) { if (modalCtx && modalCtx.key === key) { modalCtx.lib = []; renderProfileModal(); } }
+    } catch (e) { if (modalCtx && modalCtx.key === key) { modalCtx.lib = []; modalCtx.analyses = []; renderProfileModal(); } }
   }
   function renderProfileModal() {
     if (!modalCtx || modalCtx.kind !== 'profile') return;
@@ -1339,14 +1362,31 @@
     const own = auth && auth.key === key;
     profLib = modalCtx.lib || [];
     const posts = allFeed().filter(f => f.uname === key);
-    const lastAnalysis = posts.find(f => f.kind === 'analysis' && f.profile);
+    const loading = modalCtx.lib === null, an = arr(modalCtx.analyses), tab = modalCtx.tab || 'lib';
+    const date = t => { const d = new Date(t); return `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')}`; };
     const pick = live.picks.find(p => p.uname === key);
+    let pane = '';
+    if (loading) pane = '<p class="rail-empty">불러오고 있습니다…</p>';
+    else if (tab === 'lib') pane = profLib.length ? `<div class="tiles">${profLib.map((it, i) => tile(it, 'lib:' + i)).join('')}</div>` : '<p class="rail-empty">아직 담은 음악이 없습니다.</p>';
+    else if (tab === 'taste') {
+      const withP = an.filter(f => f.profile && f.profile.summary), last = withP[0];
+      pane = last ? `<p class="hint">최근 분석 · ${date(last.createdAt)}</p><p class="summary">${esc(last.profile.summary)}</p>
+        ${arr(last.profile.genres).length ? `<ul class="gbars">${arr(last.profile.genres).slice(0, 5).map(x => `<li><span>${esc(x.name)}</span><span class="bar"><i style="width:${Math.max(4, Math.min(100, +x.weight || 0))}%"></i></span><b class="gv">${Math.round(Math.max(0, Math.min(100, +x.weight || 0)))}</b></li>`).join('')}</ul>` : ''}
+        ${arr(last.profile.keywords).length ? `<ul class="chips">${arr(last.profile.keywords).map(k => `<li class="tag">${esc(k)}</li>`).join('')}</ul>` : ''}
+        ${withP.length > 1 ? `<p class="hr" aria-hidden="true"></p><p class="hint">이전 분석</p><ul class="prev-an">${withP.slice(1, 6).map(f => `<li><b>${date(f.createdAt)}</b> ${esc(f.profile.summary)}</li>`).join('')}</ul>` : ''}`
+        : '<p class="rail-empty">아직 취향 분석 기록이 없습니다.</p>';
+    } else {
+      pane = an.length ? an.map(f => `<p class="hint">${date(f.createdAt)} · ${arr(f.items).length}개</p><div class="tiles">${arr(f.items).map((it, i) => tile(it, `pa:${f.id}:${i}`, it.match ? `<span class="pill match ms">${esc(it.match)}</span>` : '')).join('')}</div>`).join('')
+        : '<p class="rail-empty">아직 추천받은 음악이 없습니다.</p>';
+    }
+    const tabs = [['lib', '담은 음악'], ['taste', '취향 분석'], ['recs', '추천 음악']];
     $('#modal-body').innerHTML = `<div class="prof-top">${avatar(a.username, 'lg')}<div><h3>${esc(a.username)} ${live.admins.includes(key) ? '<span class="badge">ADMIN</span>' : ''}</h3>
-        <div class="stats"><span><b>${visitCount(key)}</b>방문</span><span><b>${profLib.length}</b>담은 음악</span><span><b>${posts.length}</b>소식</span><span>${timeAgo(a.createdAt || 0)} 가입</span></div></div></div>
-      ${pick ? `<section style="display:grid;gap:8px"><h4>오늘의 추천</h4><div class="tiles" style="grid-template-columns:repeat(auto-fill,minmax(104px,130px))">${tile(pick.item, 'pick:' + pick.id)}</div></section>` : ''}
-      ${lastAnalysis ? `<section class="profile" style="padding:18px"><p class="eyebrow">최근 취향 분석 · ${timeAgo(lastAnalysis.createdAt)}</p><p class="summary" style="font-size:18px">${esc(lastAnalysis.profile.summary)}</p></section>` : ''}
-      <section style="display:grid;gap:10px"><h4>좋아하는 음악 ${modalCtx.lib ? `<span class="hint">${profLib.length}</span>` : ''}</h4>
-        ${modalCtx.lib === null ? '<p class="rail-empty">불러오고 있습니다…</p>' : (profLib.length ? `<div class="tiles">${profLib.map((it, i) => tile(it, 'lib:' + i)).join('')}</div>` : '<p class="rail-empty">아직 담은 음악이 없습니다.</p>')}</section>
+        <div class="stats"><span><b>${visitCount(key)}</b>방문</span><span><b>${profLib.length}</b>담은 음악</span><span><b>${postCount(key)}</b>소식</span><span>${timeAgo(a.createdAt || 0)} 가입</span></div></div></div>
+      ${pick ? `<section style="display:grid;gap:8px"><h4>오늘의 추천</h4><div class="tiles">${tile(pick.item, 'pick:' + pick.id)}</div></section>` : ''}
+      <p class="hr" aria-hidden="true"></p>
+      <div class="seg prof-tabs" role="group" aria-label="보기">${tabs.map(([k, l]) => `<button type="button" data-ptab="${k}" aria-pressed="${tab === k}">${l}</button>`).join('')}</div>
+      <section class="prof-pane" aria-live="polite">${pane}</section>
+      <p class="hr" aria-hidden="true"></p>
       <section style="display:grid;gap:10px"><h4>방명록 <span class="hint">${modalCtx.messages.length}</span></h4>
         ${canAct() ? `<form class="msg-form" id="msg-form"><input type="text" id="msg-body" maxlength="200" placeholder="${own ? '내 방명록에 한마디' : esc(a.username) + '님께 한마디'}" aria-label="방명록 내용"><button class="btn btn-sm btn-primary" type="submit">남기기</button></form>` : '<p class="hint">Join하면 방명록을 남길 수 있습니다.</p>'}
         ${modalCtx.messages.length ? `<ul class="msgs">${modalCtx.messages.map(m => `<li class="msg"><div class="msg-top"><b>${esc(nameOf(m.from))}</b><span>${timeAgo(m.createdAt)}</span>${auth && (own || m.from === auth.key || isAdmin()) ? `<button class="del" type="button" data-delmsg="${esc(m.id)}">지우기</button>` : ''}</div><p>${esc(m.body)}</p></li>`).join('')}</ul>` : ''}

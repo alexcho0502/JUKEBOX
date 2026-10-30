@@ -602,3 +602,17 @@ button,a,summary,label{-webkit-tap-highlight-color:transparent}
 /* [더보기] under the feed and MY ACTIVITY */
 .list-more{display:flex;justify-content:center;padding-top:calc(var(--lh) * .4em)}
 .cfeed>.more-li{list-style:none;border:0}
+/* user popup: three views behind [ ] tabs */
+.prof-tabs{display:flex;flex-wrap:wrap;gap:.3em 1.2em;justify-content:center}
+.prof-pane{display:grid;grid-template-columns:minmax(0,1fr);gap:calc(var(--lh) * .4em) 0;min-height:6em}
+.prof-pane .summary{line-height:1.5}
+.prof-pane .tiles{display:grid;grid-template-columns:minmax(0,1fr);gap:0}
+.prev-an{list-style:none;margin:0;padding:0;display:grid;gap:.35em}
+.prev-an b{margin-right:.4em}
+#modal-body .tile{grid-template-columns:calc(var(--lh) * 3em) minmax(0,1fr);gap:0 .6em;padding-bottom:.4em}
+#modal-body .tile .tc{width:calc(var(--lh) * 3em);height:calc(var(--lh) * 3em)}
+#modal-body .tile b{font-weight:700}
+.prof-tabs{flex-wrap:nowrap;justify-content:space-between;gap:0 .4em}
+.prof-tabs button{font-size:.96em;min-width:0}
+.prof-tabs button::before{content:"[\00a0]"!important;margin-right:.35em}
+.prof-tabs button[aria-pressed="true"]::after{left:.1em}
