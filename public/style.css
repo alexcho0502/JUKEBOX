@@ -616,3 +616,4 @@ button,a,summary,label{-webkit-tap-highlight-color:transparent}
 .prof-tabs button{font-size:.96em;min-width:0}
 .prof-tabs button::before{content:"[\00a0]"!important;margin-right:.35em}
 .prof-tabs button[aria-pressed="true"]::after{left:.1em}
+.card .chk{opacity:.72}

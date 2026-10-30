@@ -181,6 +181,20 @@
     if (hit && await imgOk(art600(hit.artworkUrl100))) return { u: art600(hit.artworkUrl100), answered };
     return { u: '', answered };
   }
+  // does this recommendation exist? Deezer first, then Apple Music (US, KR) — straight from the browser
+  async function existsInBrowser(r) {
+    const track = r.type === 'track'; let answered = false;
+    const seen = d => { if (d) answered = true; return d; };
+    const d = seen(await dz(`search/${track ? 'track' : 'album'}?limit=10&q=${enc(`artist:"${r.artist}" ${track ? 'track' : 'album'}:"${r.title}"`)}`));
+    const d2 = d && arr(d.data).length ? d : seen(await dz(`search/${track ? 'track' : 'album'}?limit=15&q=${enc(r.artist + ' ' + r.title)}`));
+    const h = d2 && arr(d2.data).find(x => looseEq(x.artist && x.artist.name, r.artist) && looseEq(x.title, r.title));
+    if (h) return { found: true, cover: dzCover(track ? h.album : h), year: String(h.release_date || '').slice(0, 4) };
+    const q = `https://itunes.apple.com/search?media=music&entity=${track ? 'song' : 'album'}&limit=15&term=${enc(r.artist + ' ' + r.title)}`;
+    const ap = (await Promise.all(['US', 'KR'].map(c => jsonp(q + '&country=' + c, 6000).then(seen)))).flatMap(x => arr(x && x.results));
+    const a = ap.find(x => looseEq(x.artistName, r.artist) && looseEq(track ? x.trackName : x.collectionName, r.title));
+    if (a) return { found: true, cover: art600(a.artworkUrl100), link: (track ? a.trackViewUrl : a.collectionViewUrl) || '', year: String(a.releaseDate || '').slice(0, 4) };
+    return { found: false, answered };
+  }
   const repairQ = new Map(), triedAt = new Map(); let repairing = false;
   function scanCovers() {
     $$('.art[data-ck]').forEach(a => {
@@ -197,13 +211,16 @@
     if (repairing) return; repairing = true;
     try {
       while (repairQ.size) {
-        const [k, o] = repairQ.entries().next().value;
-        let r = { u: '', answered: false }; try { r = await findCover(o); } catch (e) { /* keep r */ }
-        repairQ.delete(k); triedAt.set(k, Date.now());
-        // remember a miss only briefly, and not at all when no catalogue could be reached
-        if (r.u || r.answered) { coverMap[k] = { u: r.u, t: Date.now() }; saveCovers(); }
-        if (r.u) applyCover(k, o, r.u);
-        await new Promise(r => setTimeout(r, 350));
+        // three at a time
+        const batch = [...repairQ.entries()].slice(0, 3);
+        await Promise.all(batch.map(async ([k, o]) => {
+          let r = { u: '', answered: false }; try { r = await findCover(o); } catch (e) { /* keep r */ }
+          repairQ.delete(k); triedAt.set(k, Date.now());
+          // remember a miss only briefly, and not at all when no catalogue could be reached
+          if (r.u || r.answered) { coverMap[k] = { u: r.u, t: Date.now() }; saveCovers(); }
+          if (r.u) applyCover(k, o, r.u);
+        }));
+        await new Promise(r => setTimeout(r, 250));
       }
     } finally { repairing = false; }
   }
@@ -858,6 +875,7 @@
       <div class="card-body">
         <div class="titles"><div class="ln"><h4><span class="qt" aria-hidden="true">「</span>${esc(r.title)}<span class="qt" aria-hidden="true">」</span></h4><i class="lead"></i>${r.match ? `<b class="price" aria-label="match score ${esc(r.match)}">${esc(r.match)}</b>` : ''}</div><p class="l2">${esc(r.artist)}</p><p class="l3">${esc(r.year || '')} · ${KIND_LBL[r.type] || 'Album'}${r.country ? ' · ' + esc(r.country) : ''}</p></div>
         ${r.genre ? `<p class="genre">${esc(r.genre)}</p>` : ''}
+        ${r._chk ? '<p class="chk">* 음원 사이트에서 실제로 있는지 확인하고 있습니다</p>' : ''}
         <p class="why">${esc(r.why)}</p>
         ${r.axis && (r.axis.axis || r.axis.detail) ? `<p class="axis"><b>${esc(r.axis.axis)}</b>${esc(r.axis.detail)}</p>` : ''}${extra}
         <div class="card-foot">${links(r)}${opt.sample ? '' : `<div class="fb" data-key="${esc(recKey(r))}" data-i="${i}"><button type="button" class="up" aria-pressed="${v === 'up'}">취향 맞음</button><button type="button" class="down" aria-pressed="${v === 'down'}">아님</button><button type="button" class="pk" aria-pressed="${isPicked(r)}">오늘의 추천</button></div>`}</div>
@@ -917,67 +935,97 @@
     const ctl = runCtl = new AbortController();
     const tick = setInterval(() => { const e = $('#music-status .el'); if (e) e.textContent = elapsed(); }, 1000);
     let late = false; const guard = setTimeout(() => { late = true; ctl.abort(); }, 95000);
-    const byI = new Map(), spare = [], want = Math.max(1, +O.n || 5); let got = 0, dropped = 0, failed = null, done = null;
-    const showRec = r => { const at = state.results.recs.push(r) - 1; got++; ensureSec(); $('#music-recs').append(recCard(r, at, { fresh: true })); };
+    const byI = new Map(), spare = [], gone = [], want = Math.max(1, +O.n || 5); let got = 0, dropped = 0, failed = null, done = null, round = 0;
     const ensureSec = () => {
       if ($('#music-recs')) return;
       const sec = document.createElement('section');
       sec.innerHTML = `<div class="sec-head"><h3>RECOMMENDED</h3></div><div class="cols"><span>NO ITEM</span><span>MATCH SCORE / 100</span></div><div class="cards" id="music-recs"></div>`;
       $('#music-results').append(sec);
     };
+    const showRec = r => { r._chk = !r.verified; const at = state.results.recs.push(r) - 1; got++; ensureSec(); $('#music-recs').append(recCard(r, at, { fresh: true })); };
+    const redraw = r => { const at = state.results.recs.indexOf(r), old = at >= 0 && $('#music-recs') && $('#music-recs').children[at]; if (old) old.replaceWith(recCard(r, at)); };
+    // a recommendation no music service knows is almost always made up: take it out, bring in a spare
+    const dropRec = r => {
+      dropped++; gone.push(`${r.artist} — ${r.title}`);
+      const sp = spare.findIndex(x => x.r === r); if (sp >= 0) { spare.splice(sp, 1); return; }
+      const at = state.results.recs.indexOf(r); if (at < 0) return;
+      state.results.recs.splice(at, 1); got--;
+      const box = $('#music-recs'); if (box) { box.innerHTML = ''; state.results.recs.forEach((x, n) => box.append(recCard(x, n))); }
+      const next = spare.shift(); if (next) showRec(next.r);
+      save();
+    };
     const onEvent = ev => {
-      if (ev.t === 'profile' && !more) {
+      const key = round + ':' + ev.i;
+      if (ev.t === 'profile' && !more && !round) {
         state.results.profile = ev.profile;
         $('#music-results .profile')?.remove();
         $('#music-status').after(profileBlock(ev.profile));
       } else if (ev.t === 'rec') {
         const r = ev.rec, k = recKey(r);
-        if (state.results.recs.some(x => recKey(x) === k) || spare.some(x => recKey(x.r) === k)) return;
-        byI.set(ev.i, r);
-        if (got >= want) { spare.push({ i: ev.i, r }); return; }   // spares wait unseen in case one gets dropped
+        if (state.results.recs.some(x => recKey(x) === k) || spare.some(x => recKey(x.r) === k) || gone.includes(`${r.artist} — ${r.title}`)) return;
+        byI.set(key, r);
+        if (got >= want) { spare.push({ i: key, r }); return; }   // spares wait unseen in case one gets dropped
         showRec(r);
-        setStatus(`${got}개가 도착했습니다 · 실제 수록곡과 커버를 확인하고 있습니다`, true); save();
+        setStatus(`${got}개가 도착했습니다 · 음원 사이트에서 실제로 있는지 확인하고 있습니다`, true); save();
       } else if (ev.t === 'fix') {
-        const r = byI.get(ev.i); if (!r) return;
-        Object.assign(r, ev.patch);
-        const at = state.results.recs.indexOf(r);
-        const old = at >= 0 && $('#music-recs') && $('#music-recs').children[at]; if (old) old.replaceWith(recCard(r, at));
-        save();
+        const r = byI.get(key); if (!r) return;
+        Object.assign(r, ev.patch); if (r.verified) r._chk = false;
+        redraw(r); save();
       } else if (ev.t === 'drop') {
-        // no catalogue knows this one (likely a made-up title): take it out, bring in a spare
-        const r = byI.get(ev.i); if (!r) return;
-        dropped++;
-        const sp = spare.findIndex(x => x.r === r); if (sp >= 0) { spare.splice(sp, 1); return; }
-        const at = state.results.recs.indexOf(r); if (at < 0) return;
-        state.results.recs.splice(at, 1); got--;
-        const box = $('#music-recs'); if (box) { box.innerHTML = ''; state.results.recs.forEach((x, n) => box.append(recCard(x, n))); }
-        const next = spare.shift(); if (next) showRec(next.r);
-        save();
+        const r = byI.get(key); if (r) dropRec(r);
       } else if (ev.t === 'done') done = ev;
       else if (ev.t === 'error') failed = ev;
     };
-    try {
+    const pump = async body => {
       const headers = { 'content-type': 'application/json', accept: 'application/x-ndjson' };
       if (auth && auth.token) headers.authorization = 'Bearer ' + auth.token;
-      const r = await fetch('/api/recommend', { method: 'POST', headers, body: JSON.stringify(payload(more)), signal: ctl.signal });
-      if (!r.ok) { let d = null; try { d = await r.json(); } catch (e) { /* not json */ } failed = (d && d.error) || { message: `서버 오류 (${r.status})` }; }
-      else {
-        const reader = r.body.getReader(), dec = new TextDecoder(); let buf = '';
-        for (;;) {
-          const { value, done: end } = await reader.read(); if (end) break;
-          buf += dec.decode(value, { stream: true });
-          let k; while ((k = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, k).trim(); buf = buf.slice(k + 1); if (line) { try { onEvent(JSON.parse(line)); } catch (e) { /* skip */ } } }
+      const r = await fetch('/api/recommend', { method: 'POST', headers, body: JSON.stringify(body), signal: ctl.signal });
+      if (!r.ok) { let d = null; try { d = await r.json(); } catch (e) { /* not json */ } return (d && d.error) || { message: `서버 오류 (${r.status})` }; }
+      const reader = r.body.getReader(), dec = new TextDecoder(); let buf = '';
+      for (;;) {
+        const { value, done: end } = await reader.read(); if (end) break;
+        buf += dec.decode(value, { stream: true });
+        let k; while ((k = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, k).trim(); buf = buf.slice(k + 1); if (line) { try { onEvent(JSON.parse(line)); } catch (e) { /* skip */ } } }
+      }
+      if (buf.trim()) { try { onEvent(JSON.parse(buf)); } catch (e) { /* skip */ } }
+      return null;
+    };
+    // what the server couldn't confirm, the browser checks itself on Deezer and Apple Music
+    const browserCheck = async () => {
+      const todo = state.results.recs.slice(before).filter(r => !r.verified);
+      for (let k = 0; k < todo.length; k += 2) {
+        await Promise.all(todo.slice(k, k + 2).map(async r => {
+          const x = await existsInBrowser(r).catch(() => ({ found: false, answered: false }));
+          if (x.found) { r.verified = true; r._chk = false; ['cover', 'link', 'year'].forEach(f => { if (x[f] && !r[f]) r[f] = x[f]; }); redraw(r); }
+          else if (x.answered) dropRec(r);
+          else { r._chk = false; redraw(r); }
+        }));
+      }
+    };
+    try {
+      failed = await pump(payload(more));
+      if (!failed) {
+        await browserCheck();
+        // still short: ask again for real works, telling the engine which titles were made up
+        while (!failed && got < want && round < 2 && Date.now() - runT0 < 80000 && got + dropped > 0) {
+          round++; spare.length = 0;
+          setStatus(`음원 사이트에 없는 작품 ${dropped}개를 빼고, 실제로 있는 작품으로 다시 채우고 있습니다`, true);
+          const body = payload(true);
+          body.more.fill = want - got; body.more.gone = gone.slice(-40);
+          failed = await pump(body);
+          if (!failed) await browserCheck();
         }
-        if (buf.trim()) { try { onEvent(JSON.parse(buf)); } catch (e) { /* skip */ } }
+        failed = null;
       }
     } catch (e) { failed = late ? { message: '추천 엔진의 응답이 너무 늦어 멈췄습니다. 잠시 뒤 다시 시도해 주세요.' } : e && e.name === 'AbortError' ? { code: 'cancelled' } : { message: '서버와 연결이 끊겼습니다. 다시 시도해 주세요.' }; }
+    state.results.recs.forEach(r => { delete r._chk; });
     clearInterval(tick); clearTimeout(guard);
     setBusy(false); save(); renderResults();
     if (failed && failed.code === 'cancelled') setStatus(got ? `멈췄습니다. ${got}개까지 받았습니다.` : '멈췄습니다.', false);
     else if (failed && !got) setStatus(failed.message || '추천을 받지 못했습니다. 다시 시도해 주세요.', false);
     else if (!got) setStatus('새로운 추천을 받지 못했습니다. 설정을 바꿔 다시 시도해 주세요.', false);
     else {
-      setStatus((dropped ? `음원 사이트에서 확인되지 않은 ${dropped}개는 빼고 다른 작품으로 채웠습니다. ` : '') + (done && done.fixed > 0 ? `수록곡 확인에서 ${done.fixed}건을 바로잡았습니다. ` : '') + `${got}개를 추천했습니다. “취향 맞음”을 누르면 다음 추천에 반영되고${auth ? ' Community에도 공유됩니다.' : ', 로그인하면 Community에 공유됩니다.'}`, false);
+      setStatus((dropped ? `음원 사이트에 없는(지어낸) 작품 ${dropped}개는 빼고 실제 작품으로 채웠습니다. ` : '') + (done && done.fixed > 0 ? `수록곡 확인에서 ${done.fixed}건을 바로잡았습니다. ` : '') + `${got}개를 추천했습니다. “취향 맞음”을 누르면 다음 추천에 반영되고${auth ? ' Community에도 공유됩니다.' : ', 로그인하면 Community에 공유됩니다.'}`, false);
       if (auth && $('#music-share').checked) postAnalysis(state.results.recs.slice(before), more ? null : state.results.profile);
       else if (!auth && $('#music-share').checked) {
         pendingShare = { recs: state.results.recs.slice(before), profile: more ? null : state.results.profile };

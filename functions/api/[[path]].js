@@ -253,7 +253,12 @@ const norm = t => String(t || '').toLowerCase().normalize('NFKD').replace(/[̀-�
   .replace(/\(.*?\)|\[.*?\]|\s-\s(single|ep)$|feat\..*$|-\s*(\d{4}\s*)?remaster.*$/g, '').replace(/^the\s+/, '').replace(/[^a-z0-9가-힣]+/g, '');
 const same = (a, b) => { const x = norm(a), y = norm(b); return !!x && !!y && (x === y || (x.length > 4 && y.length > 4 && (x.includes(y) || y.includes(x)))); };
 const art600 = u => okUrl(String(u || '').replace(/\/\d+x\d+bb\./, '/600x600bb.'), COVER_HOST);
+let mbChain = Promise.resolve();
 async function getJson(url, headers = {}, ttl = 86400) {
+  if (url.startsWith('https://musicbrainz.org/')) {
+    const turn = mbChain.then(() => new Promise(r => setTimeout(r, 1050)));
+    mbChain = turn; await turn;
+  }
   try {
     const r = await fetch(url, { headers: { accept: 'application/json', ...headers }, cf: { cacheTtl: ttl, cacheEverything: true }, signal: AbortSignal.timeout(8000) });
     return r.ok ? await r.json() : null;
@@ -425,12 +430,13 @@ summary, why, detail을 포함한 모든 한국어 문장은 존댓말 합쇼체
 '~한다', '~이다', '~했다' 같은 반말 평서문과 '~해요', '~예요' 체는 절대 쓰지 마라.`;
 function buildPrompt(items, o, more) {
   const list = items.map((it, i) => `${i + 1}. [${it.type === 'track' ? '곡' : '앨범'}] ${it.artist} — ${it.title}${it.year ? ' (' + it.year + ')' : ''}${it.rating ? ` — 별점 ${it.rating}/5` : ''}`).join('\n');
-  const n0 = [3, 5, 7].includes(+o.n) ? +o.n : 5, n = n0 + (n0 >= 5 ? 2 : 1);  // spares: anything the catalogues don't know is dropped
+  const fill = more && more.fill ? int(more.fill, 1, 7, 0) : 0;
+  const n0 = fill || ([3, 5, 7].includes(+o.n) ? +o.n : 5), n = n0 + (fill ? 1 : n0 >= 5 ? 2 : 1);  // spares: anything the catalogues don't know is dropped
   const fmt = { both: '앨범과 곡을 섞어서', album: '앨범만', track: '곡(싱글 또는 수록곡)만' }[o.format] || '앨범과 곡을 섞어서';
   const axes = strList(o.axes, 8, 20).filter(a => AXES.includes(a)), region = strList(o.region, 6, 20);
   const f = int(o.eraFrom, 1900, 2030, 0), t = int(o.eraTo, 1900, 2030, 0);
   const era = f && t ? `- ${Math.min(f, t)}년대부터 ${Math.max(f, t)}년대까지 발매된 작품만 추천하라.` : f ? `- ${f}년대 이후에 발매된 작품만 추천하라.` : t ? `- ${t}년대까지 발매된 작품만 추천하라.` : '';
-  const prev = more ? strList(more.prev, 120, 160) : [], up = more ? strList(more.up, 60, 160) : [], down = more ? strList(more.down, 60, 160) : [];
+  const prev = more ? strList(more.prev, 120, 160) : [], up = more ? strList(more.up, 60, 160) : [], down = more ? strList(more.down, 60, 160) : [], gone = more ? strList(more.gone, 40, 160) : [];
   const lines = [
     `- 이 취향에 맞는 음악을 ${n}개 추천하라. 형식: ${fmt}.`,
     `- 유사도: ${SIM_TXT[int(o.sim, 1, 5, 3)]}.`, `- 인지도: ${POP_TXT[int(o.pop, 1, 5, 3)]}.`, era,
@@ -441,6 +447,7 @@ function buildPrompt(items, o, more) {
     clip(o.exclude, 300) ? `- 다음 아티스트는 추천하지 마라: ${clip(o.exclude, 300)}` : '',
     clip(o.note, 300) ? '- 사용자의 추가 요청: ' + clip(o.note, 300) : '',
     prev.length ? '- 이미 추천한 다음 작품은 다시 추천하지 마라: ' + prev.join('; ') : '',
+    gone.length ? '- 다음 작품은 Apple Music·Deezer 어디에도 없어 지어낸 것으로 판정돼 뺐다. 이런 실수를 반복하지 말고, 디스코그래피가 잘 알려진 아티스트의 실제 정규 앨범이나 대표곡만 써라: ' + gone.join('; ') : '',
     up.length ? '- 사용자가 "취향에 맞다"고 표시한 추천: ' + up.join('; ') + ' → 이 방향을 더 반영하라.' : '',
     down.length ? '- 사용자가 "아니다"라고 표시한 추천: ' + down.join('; ') + ' → 이런 방향은 피하라.' : '',
   ].filter(Boolean).join('\n');
@@ -623,15 +630,16 @@ async function verifyOne(r, budget) {
   if (r.type === 'track') {
     if (!take(1)) return { patch, fixed };
     const s = await findSong(r.artist, r.title);
+    if (s.albums.length) patch.verified = true;
     if (s.cover) patch.cover = s.cover; if (s.link) patch.link = s.link;
     let dzAnswered = false, dzFound = false;
-    if (!s.cover && take(1)) {
+    if (!s.albums.length && take(1)) {
       const d = await getJson(`https://api.deezer.com/search/track?limit=10&q=${encodeURIComponent(`artist:"${r.artist.replace(/"/g, '')}" track:"${r.title.replace(/"/g, '')}"`)}`);
       dzAnswered = !!d;
       const h = d && arr(d.data).find(x => same(x.artist && x.artist.name, r.artist) && same(x.title, r.title));
-      if (h && h.album) { dzFound = true; const c = okUrl(h.album.cover_xl || h.album.cover_big, COVER_HOST); if (c) patch.cover = c; }
+      if (h && h.album) { dzFound = true; patch.verified = true; const c = okUrl(h.album.cover_xl || h.album.cover_big, COVER_HOST); if (c && !patch.cover) patch.cover = c; }
     }
-    if (!s.albums.length && !dzFound && s.answered && dzAnswered) return { patch, fixed, missing: true };
+    if (!patch.verified && (s.answered || dzAnswered)) return { patch, fixed, missing: true };
     if (s.albums.length && !s.albums.some(a => same(a, r.album)) && s.first && s.first !== r.album) { patch.album = s.first; fixed = true; }
     return { patch, fixed };
   }
@@ -643,18 +651,20 @@ async function verifyOne(r, budget) {
   if (!al.id && take(1)) dz = await dzAlbum(r.artist, r.title);                     // Deezer
   if (!al.id && !(dz && dz.id) && take(1)) { const kr = await appleAlbum(r.artist, r.title, 'KR'); krAnswered = kr.answered; if (kr.id) al = kr; }
   if (al.id) {
+    patch.verified = true;
     if (al.cover) patch.cover = al.cover; if (al.link) patch.link = al.link;
     if (take(1)) tracks = await albumTracks(al);
   } else if (dz && dz.id) {
+    patch.verified = true;
     if (dz.cover) patch.cover = dz.cover;
     if (take(1)) tracks = await dzTracks(dz.id);
   } else {
-    const appleAnswered = usAnswered || krAnswered;
-    if (dz && appleAnswered) return { patch, fixed, missing: true };               // Apple and Deezer both answered: nobody has it
+    // nobody that answered has it → made up (or not on any music service, so it can't be played either)
+    if (usAnswered || krAnswered || dz) return { patch, fixed, missing: true };
     if (take(2)) {
       const mb = await mbTracks(r.artist, r.title);
-      if (mb && mb.tracks) { tracks = mb.tracks; if (mb.cover) patch.cover = mb.cover; }
-      else if (mb && (appleAnswered || dz)) return { patch, fixed, missing: true };
+      if (mb && mb.tracks) { patch.verified = true; tracks = mb.tracks; if (mb.cover) patch.cover = mb.cover; }
+      else if (mb) return { patch, fixed, missing: true };
     }
   }
   if (!tracks.length) return { patch, fixed };
@@ -685,7 +695,7 @@ async function recommend(req, env) {
   const send = o => w.write(te.encode(JSON.stringify(o) + '\n')).catch(() => {});
   (async () => {
     const budget = { n: 36 }, checks = [], recs = [], seen = new Set(), picks = [], gone = [], t0 = now();
-    const want = [3, 5, 7].includes(+(b && b.opts && b.opts.n)) ? +b.opts.n : 5;
+    const want = b && b.more && b.more.fill ? int(b.more.fill, 1, 7, 1) : [3, 5, 7].includes(+(b && b.opts && b.opts.n)) ? +b.opts.n : 5;
     let fixed = 0, dropped = 0, profiled = false;
     const onLine = line => {
       const x = recLine(line); if (!x) return;
