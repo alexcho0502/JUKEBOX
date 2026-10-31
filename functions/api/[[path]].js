@@ -258,6 +258,19 @@ async function adminUnlock(env, me, key) {
 const norm = t => String(t || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/&/g, ' and ').replace(/(^|\s)['’]?n['’]?(?=\s)/g, ' and ').replace(/[’'`]/g, '')
   .replace(/\(.*?\)|\[.*?\]|\s-\s(single|ep)$|feat\..*$|-\s*(\d{4}\s*)?remaster.*$/g, '').replace(/^the\s+/, '').replace(/[^a-z0-9가-힣]+/g, '');
 const same = (a, b) => { const x = norm(a), y = norm(b); return !!x && !!y && (x === y || (x.length > 4 && y.length > 4 && (x.includes(y) || y.includes(x)))); };
+// "does it exist" needs the exact name: a title that merely contains another one ("Sleepwalking" in "Sleepwalking Again")
+// or an artist that merely contains another ("Tambourines" in "The Black Tambourines") is a different record.
+const words = t => String(t || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/&/g, ' and ').replace(/[’'`]/g, '')
+  .replace(/\(.*?\)|\[.*?\]/g, ' ').split(/[^a-z0-9가-힣぀-ヿ㐀-鿿]+/).filter(Boolean);
+const JOIN = new Set(['and', 'with', 'feat', 'ft', 'featuring', 'x', 'vs']);
+const sameTitle = (a, b) => { const x = norm(a), y = norm(b); return !!x && x === y; };
+const sameArtist = (a, b) => {
+  let x = words(a), y = words(b); if (x[0] === 'the') x = x.slice(1); if (y[0] === 'the') y = y.slice(1);
+  if (!x.length || !y.length) return false;
+  if (x.join('') === y.join('')) return true;
+  const [s, l] = x.length < y.length ? [x, y] : [y, x];      // "D'Angelo" ~ "D'Angelo and The Vanguard", not "Tambourines" ~ "Black Tambourines"
+  return s.every((w, i) => l[i] === w) && JOIN.has(l[s.length]);
+};
 const art600 = u => okUrl(String(u || '').replace(/\/\d+x\d+bb\./, '/600x600bb.'), COVER_HOST);
 // Cloudflare runs each request in its own context: a promise or timer made while serving one visitor must not be
 // waited on while serving another (it can hang forever). So nothing here is shared between requests except plain values.
@@ -304,14 +317,18 @@ async function albumTracks(album) {
 }
 // MusicBrainz knows nearly every released record: true = exists, false = no such record, null = couldn't ask
 async function mbExists(type, artist, title) {
-  const a = artist.replace(/"/g, ''), t = title.replace(/"/g, '');
+  const a = luceneWords(artist).toLowerCase(), t = luceneWords(title).toLowerCase();
+  if (!a || !t) return { mb: null };
   const ent = type === 'track' ? 'recording' : 'release-group';
-  const q = type === 'track' ? `recording:"${t}" AND artist:"${a}"` : `releasegroup:"${t}" AND artist:"${a}"`;
-  const s = await getJson(`https://musicbrainz.org/ws/2/${ent}?fmt=json&limit=10&query=${encodeURIComponent(q)}`, { 'user-agent': UA }, 604800);
+  const q = type === 'track' ? `recording:(${t}) AND artist:(${a})` : `releasegroup:(${t}) AND artist:(${a})`;
+  const s = await getJson(`https://musicbrainz.org/ws/2/${ent}?fmt=json&limit=15&query=${encodeURIComponent(q)}`, { 'user-agent': UA }, 604800);
   if (!s) return { mb: null };
   const list = arr(type === 'track' ? s.recordings : s['release-groups']);
-  const hit = list.find(x => same(x.title, title) && arr(x['artist-credit']).some(c => same(c.name || (c.artist && c.artist.name), artist) || same(c.artist && c.artist.name, artist)));
-  return hit ? { mb: true, cover: type === 'track' ? '' : `https://coverartarchive.org/release-group/${hit.id}/front-500`, year: String(hit['first-release-date'] || '').slice(0, 4) } : { mb: false };
+  const credit = x => { const c = arr(x['artist-credit']); return [c.map(k => (k.name || '') + (k.joinphrase || '')).join(''), ...c.map(k => k.name), ...c.map(k => k.artist && k.artist.name)]; };
+  const hit = list.find(x => sameTitle(x.title, title) && credit(x).some(n => n && sameArtist(n, artist)));
+  if (!hit) return { mb: false };
+  const rg = type === 'track' ? (arr(hit.releases).map(x => x['release-group']).find(Boolean) || {}).id : hit.id;
+  return { mb: true, cover: rg ? `https://coverartarchive.org/release-group/${rg}/front-250` : '', year: String(hit['first-release-date'] || '').slice(0, 4) };
 }
 // GET /api/exists?type=&artist=&title= — the browser's last check before it drops a recommendation
 async function existsLookup(req) {
@@ -321,7 +338,7 @@ async function existsLookup(req) {
 }
 async function findSong(artist, title) {
   const raw = await itunesRaw({ term: `${artist} ${title}`, entity: 'song', limit: '15' });
-  const list = arr(raw).filter(x => same(x.artistName, artist) && same(x.trackName, title));
+  const list = arr(raw).filter(x => sameArtist(x.artistName, artist) && sameTitle(x.trackName, title));
   const original = list.find(x => !/greatest|best of|hits|collection|anthology|essential|live/i.test(x.collectionName)) || list[0];
   return { answered: !!raw, albums: list.map(x => x.collectionName), first: original ? original.collectionName : '', cover: original ? art600(original.artworkUrl100) : '', link: original ? okUrl(original.trackViewUrl, LINK_HOST) : '' };
 }
@@ -496,6 +513,8 @@ ${lines}
 - 추천한 작품은 서버가 Apple Music·Deezer 카탈로그에서 하나하나 찾아본다. 찾지 못한 작품은 지어낸 것으로 보고 버린다.
 - 그러니 제목이 정확히 떠오르지 않는 작품, 존재 여부가 애매한 작품은 절대 쓰지 마라. 숨은 작품을 추천할 때도 실제로 발매된 것을 확실히 아는 것만 써라.
 - 아티스트의 다른 앨범 제목, 수록곡 제목, 다른 아티스트의 앨범 제목을 섞어 새 제목을 만들지 마라.
+- 실제 밴드와 이름이 비슷한 가상의 밴드를 만들지 마라(예: The Depreciation Guild는 실존하지만 The Depreciation Society는 없다). 슈게이징·드림팝·인디처럼 작은 장르일수록 이 실수가 잦으니, 그 장르에서 디스코그래피를 정확히 아는 아티스트만 써라.
+- 곡 하나만 확실하고 그 곡의 앨범이 불확실하면 앨범으로 추천하지 말고 곡으로 추천하라. 둘 다 불확실하면 다른 작품을 골라라.
 ① 실제로 존재하는 작품인가 ② 아티스트와 제목 철자가 원어 표기 그대로인가 ③ 연도가 재발매·리마스터가 아닌 최초 발매 연도인가 ④ 곡이 그 앨범에 실제로 수록됐는가 ⑤ 연결 근거로 든 사람·레이블이 실제로 참여했는가. 하나라도 확신이 없으면 그 작품은 빼라.
 ⑥ start_with는 반드시 '바로 그 앨범'의 실제 트랙리스트에 있는 곡이어야 한다. 같은 아티스트의 다른 앨범에 실린 곡, 그 아티스트가 다른 앨범에서 커버한 곡, 다른 아티스트의 원곡은 안 된다. 확실하지 않으면 빈 문자열.
 ⑦ 곡을 추천할 때 album은 그 곡이 처음 실린 '그 아티스트의' 앨범이어야 한다. 확실하지 않으면 빈 문자열.
@@ -647,7 +666,7 @@ function recLine(line) {
 // missing: at least two catalogues answered and none of them knows this work → it's dropped (spares and a top-up replace it)
 async function appleAlbum(artist, title, c) {
   const list = await itunesRaw({ term: `${artist} ${title}`, entity: 'album', limit: '10' }, c);
-  const hit = arr(list).find(x => same(x.artistName, artist) && same(x.collectionName, title));
+  const hit = arr(list).find(x => sameArtist(x.artistName, artist) && sameTitle(x.collectionName, title));
   return hit ? { id: hit.collectionId, country: c, cover: art600(hit.artworkUrl100), link: okUrl(hit.collectionViewUrl, LINK_HOST), answered: true } : { answered: !!list };
 }
 // Fast and strict: confirmed (verified) only by a catalogue hit; dropped (missing) only when Apple answered "no" AND MusicBrainz
@@ -655,10 +674,18 @@ async function appleAlbum(artist, title, c) {
 async function verifyOne(r, budget) {
   const patch = {}; let fixed = false;
   const take = n => { if (budget.n < n) return false; budget.n -= n; return true; };
-  if (now() < appleDownUntil || !take(1)) return { patch, fixed };
+  if (!take(1)) return { patch, fixed };
+  // the server can't use Apple (refused): MusicBrainz decides here; anything it can't answer is left to the browser
+  const viaMb = async () => {
+    const m = await budget.mb(() => mbExists(r.type === 'track' ? 'track' : 'album', r.artist, r.title));
+    if (m.mb === false) return { patch, fixed, missing: true };
+    if (m.mb === true) { patch.verified = true; patch.recheck = true; if (m.cover) patch.cover = m.cover; }   // MusicBrainz knows it; the browser still checks Apple (details) or the cover (proof)
+    return { patch, fixed };
+  };
+  if (now() < appleDownUntil) return viaMb();
   if (r.type === 'track') {
     const s = await findSong(r.artist, r.title);
-    if (!s.answered) return { patch, fixed };
+    if (!s.answered) return viaMb();
     if (s.albums.length) {
       patch.verified = true;
       if (s.cover) patch.cover = s.cover; if (s.link) patch.link = s.link;
@@ -667,19 +694,19 @@ async function verifyOne(r, budget) {
     }
     if (take(1)) {
       const m = await mbExists('track', r.artist, r.title);
-      if (m.mb === true) { patch.verified = true; patch.album = ''; fixed = true; }      // real, but we can't vouch for the album name
+      if (m.mb === true) { patch.verified = true; patch.recheck = true; if (m.cover) patch.cover = m.cover; }      // the browser vouches for the album name (Apple) or drops it
       else if (m.mb === false) return { patch, fixed, missing: true };
     }
     return { patch, fixed };
   }
   let al = await appleAlbum(r.artist, r.title, 'US');
-  if (!al.answered) return { patch, fixed };
+  if (!al.answered) return viaMb();
   if (!al.id && take(1)) { const kr = await appleAlbum(r.artist, r.title, 'KR'); if (kr.id) al = kr; }
   if (!al.id) {
     if (!take(1)) return { patch, fixed };
     const m = await mbExists('album', r.artist, r.title);
     if (m.mb === false) return { patch, fixed, missing: true };
-    if (m.mb === true) { patch.verified = true; if (m.cover) patch.cover = m.cover; if (r.start_with) { patch.start_with = ''; fixed = true; } }  // no tracklist to check the song against: hide it
+    if (m.mb === true) { patch.verified = true; patch.recheck = true; if (m.cover) patch.cover = m.cover; }  // not on Apple: the browser needs to see its cover before it's shown
     return { patch, fixed };
   }
   patch.verified = true;
@@ -725,10 +752,13 @@ async function recommend(req, env) {
   const w = writable.getWriter(), te = new TextEncoder();
   const send = o => w.write(te.encode(JSON.stringify(o) + '\n')).catch(() => {});
   (async () => {
-    const budget = { n: 36 }, checks = [], recs = [], seen = new Set(), picks = [], gone = [], t0 = now();
+    // MusicBrainz takes about one request a second: within this request, checks wait their turn
+    let mbLine = Promise.resolve(), mbLastAt = 0;
+    const mbOne = fn => { const run = mbLine.then(async () => { const w = mbLastAt + 1050 - now(); if (w > 0) await new Promise(r => setTimeout(r, w)); mbLastAt = now(); return fn(); }); mbLine = run.catch(() => {}); return run; };
+    const budget = { n: 36, mb: mbOne }, checks = [], recs = [], seen = new Set(), picks = [], gone = [], t0 = now();
     const want = b && b.more && b.more.fill ? int(b.more.fill, 1, 7, 1) : [3, 5, 7].includes(+(b && b.opts && b.opts.n)) ? +b.opts.n : 5;
     let fixed = 0, dropped = 0, profiled = false;
-    send({ t: 'meta', verify: now() >= appleDownUntil });
+    send({ t: 'meta', verify: true, mb: now() < appleDownUntil });   // the server checks every card (Apple, or MusicBrainz when Apple refuses it)
     const onLine = line => {
       const x = recLine(line); if (!x) return;
       if (x.profile) { if (!profiled) { profiled = true; send({ t: 'profile', profile: x.profile }); } return; }
@@ -741,7 +771,7 @@ async function recommend(req, env) {
       const res = await geminiStream(env, prompt, objects(onLine), deep ? { deep, hedgeMs: 14000, firstTextMs: 40000, totalMs: 85000 } : {});
       if (!res.ok) { if (!recs.length) await send({ t: 'error', ...res.error, notes: res.notes }); }
       else if (!recs.length) await send({ t: 'error', code: 'ai_format', message: '추천 결과를 읽지 못했습니다. 다시 시도해 주세요.' });
-      await Promise.race([Promise.all(checks), new Promise(r => setTimeout(r, 8000))]);
+      await Promise.race([Promise.all(checks), new Promise(r => setTimeout(r, 12000))]);
       // too many were made up: ask once more for real, well-documented works to fill the gap
       const short = want - (recs.length - dropped);
       if (res.ok && short > 0 && now() - t0 < 50000) {
@@ -777,7 +807,7 @@ async function health(env, req) {
   }
   const k = env.GEMINI_API_KEY || '';
   return json({
-    version: 2, build: '2026.10.30-2135', db, gemini_key: !!k,
+    version: 2, build: '2026.11.01-0010', db, gemini_key: !!k,
     gemini_key_format: k ? (k.trim() !== k ? 'has_spaces' : /^AQ\./.test(k) ? 'AQ' : /^AIza/.test(k) ? 'AIza' : 'unknown') : null,
     pin_pepper: !!env.PIN_PEPPER, admins: admins(env).length, models: modelList(env),
     deezer_here: new URL(req.url).searchParams.get('up') === '1' ? await deezerOpen() : undefined,
