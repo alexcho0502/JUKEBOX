@@ -664,3 +664,27 @@ button,a,summary,label{-webkit-tap-highlight-color:transparent}
 .entry>.search-kv .q-wrap{width:100%}
 .entry>.search-kv input[type=search]{font-size:max(16px,1em)}
 .q-wrap input[type=search]:focus-visible{outline:none;background-image:repeating-linear-gradient(90deg,var(--ink) 0 .44em,transparent .44em .5em);background-size:100% 2.5px}
+
+/* v4.1 — MODE / OPTIONS / TASTE PROFILE / RECOMMENDED: the same size as SEARCH (1.2 × 1.42); the dashes stay at text size */
+#view-music .mode-kv>.sec,#view-music details.settings>summary h3,#view-music .profile>.sec,#view-music .results .sec-head h3{font-size:1.704em!important;line-height:1.05;font-weight:700}
+#view-music .mode-kv>.sec::before,#view-music .mode-kv>.sec::after,#view-music details.settings>summary h3::before,#view-music details.settings>summary h3::after,
+#view-music .profile>.sec::before,#view-music .profile>.sec::after,#view-music .results .sec-head h3::before,#view-music .results .sec-head h3::after{font-size:.587em;min-width:1.5em}
+#view-music .mode-kv{row-gap:calc(var(--lh) * .35em)}
+/* SIMILAR / POPULAR: the numbers sit on a ruler with a tick for each step; the bar fills up to the chosen value */
+.range-wrap{--rw:12.5em;justify-items:start}
+.range-wrap .ticks{display:grid;grid-template-columns:repeat(5,1fr);width:var(--rw);max-width:100%}
+.range-wrap .ticks span{min-width:0}
+.ruler{--p:.5;position:relative;display:grid;grid-template-columns:repeat(5,1fr);width:var(--rw);max-width:100%;height:.85em;cursor:pointer}
+.ruler::before,.ruler::after{content:"";position:absolute;left:10%;top:.2em;height:1.5px;background:var(--ink)}
+.ruler::before{right:10%;opacity:.55}
+.ruler::after{width:calc(80% * var(--p));height:4px;top:calc(.2em - 1.25px)}
+.ruler i{position:relative;justify-self:center;width:1.5px;height:.62em;background:var(--ink);opacity:.7}
+.ruler i.on{width:4px;height:.85em;margin-top:-.12em;opacity:1}
+.range-ends{display:flex;justify-content:space-between;width:var(--rw);max-width:100%;font-size:.86em;opacity:.75}
+.range-wrap output{margin-top:calc(var(--lh) * .15em)}
+#view-music .mode-kv>.sec,#view-music details.settings>summary h3,#view-music .profile>.sec,#view-music .results .sec-head h3{align-items:center}
+#view-music .mode-kv>.sec{margin-top:0!important}
+#view-music .mode-kv{margin-top:calc(var(--lh) * .9em)}
+#view-music details.settings{margin-top:calc(var(--lh) * .9em)!important}
+.range-ends{padding:0 calc(var(--rw) * .1 - .6em)}
+.kv.stack>.chips li{white-space:normal}.kv.stack>.chips .chip-toggle{white-space:normal;text-align:left}

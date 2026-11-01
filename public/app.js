@@ -1,7 +1,7 @@
 
 (() => {
   'use strict';
-  const BUILD = '2026.11.01-0010';   // also shown at the bottom of the page and in /api/health — tells which version a browser is running
+  const BUILD = '2026.11.01-0930';   // also shown at the bottom of the page and in /api/health — tells which version a browser is running
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -12,11 +12,12 @@
   const AXES = ['장르', '프로듀서·엔지니어', '세션·참여진', '레이블', '씬·지역', '시대·영향 관계'];
   const REGIONS = ['영미권', '한국', '일본', '유럽 (비영어권)', '라틴·아프리카·기타'];
   const ERAS = [1940, 1950, 1960, 1970, 1980, 1990, 2000, 2010, 2020];
-  const SIM_LBL = ['', '아주 비슷한 결', '비슷한 결 중심', '비슷함과 새로움 반반', '새로운 방향 위주', '의외의 발견'];
-  const POP_LBL = ['', '널리 알려진 대표작', '대표작 중심', '알려진 작품과 숨은 작품 반반', '숨은 작품 위주', '평가 수가 적은 숨은 작품'];
+  // shown scale: the bigger the number, the more similar / the better known (the engine's own scale runs the other way: 6 − v)
+  const SIM_LBL = ['', '의외의 발견', '새로운 방향 위주', '비슷함과 새로움 반반', '비슷한 결 중심', '아주 비슷한 결'];
+  const POP_LBL = ['', '평가 수가 적은 숨은 작품', '숨은 작품 위주', '알려진 작품과 숨은 작품 반반', '대표작 중심', '널리 알려진 대표작'];
   const SIM_TXT = ['', '사용자 목록과 사운드·분위기·형식이 아주 가까운 작품만', '가까운 작품 중심에 약간 다른 결을 섞어서', '가까운 작품과 새로운 방향을 반반으로', '연결고리는 분명하되 장르·시대·형식이 다른 작품 위주로', '연결고리 하나를 따라 의외의 장르·시대·지역으로 넘어가는 발견 위주로'];
   const POP_TXT = ['', '대중적으로 널리 알려진 대표작 위주로', '잘 알려진 작품 중심에 덜 알려진 작품을 조금 섞어서', '잘 알려진 작품과 숨은 작품을 반반 정도로', '덜 알려진 작품 위주로, 잘 알려진 작품은 소수만', '평가 수가 적은 숨은 작품 위주로 (단, 실존이 확실한 것만)'];
-  const PRESETS = { safe: [1, 2], balance: [3, 3], dig: [3, 5], leap: [5, 4] };
+  const PRESETS = { safe: [5, 4], balance: [3, 3], dig: [3, 1], leap: [1, 2] };
   const PRESET_DESC = {
     safe: '지금 취향과 아주 가까운 결의 잘 알려진 작품을 추천합니다.',
     balance: '비슷한 결과 새로운 방향, 알려진 작품과 숨은 작품을 고르게 섞습니다.',
@@ -69,7 +70,7 @@
     return `<div class="art art-${style} ${extra}"${ref} style="--c0:${c0};--c1:${c1};--c2:${c2}">${style === 'type' ? `<span class="tx">${esc(t.length > 24 ? t.slice(0, 22) + '…' : t)}</span>` : ''}</div>${cov ? coverImg(cov) : ''}`;
   }
   // thumbnails don't need 600–1000px images: ask the art servers for a size that fits (4–10× fewer bytes)
-  const thumb = u => String(u).replace(/\/\d{3,4}x\d{3,4}bb\./, '/300x300bb.').replace(/\/\d{3,4}x\d{3,4}(-\d+-\d+-\d+-\d+)?\.jpg$/, '/500x500$1.jpg').replace(/\/front-(500|1200)$/, '/front-250');
+  const thumb = u => /^https:\/\/coverartarchive\.org\//.test(u) ? '/api/img?u=' + encodeURIComponent(String(u).replace(/\/front-(500|1200)$/, '/front-250')) : String(u).replace(/\/\d{3,4}x\d{3,4}bb\./, '/300x300bb.').replace(/\/\d{3,4}x\d{3,4}(-\d+-\d+-\d+-\d+)?\.jpg$/, '/500x500$1.jpg').replace(/\/front-(500|1200)$/, '/front-250');
   const coverImg = u => `<img class="art-img" src="${esc(thumb(u))}" data-u="${esc(u)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="window.__jbCoverFail&&window.__jbCoverFail(this)">`;
   const compact = it => ({ type: it.type === 'track' ? 'track' : 'album', title: String(it.title || '').slice(0, 160), artist: String(it.artist || '').slice(0, 120), album: String(it.album || '').slice(0, 160), year: String(it.year || '').slice(0, 6), genre: String(it.genre || arr(it.primary).join(', ') || '').slice(0, 80), country: String(it.country || '').slice(0, 40), colors: arr(it.colors).filter(x => HEX.test(String(x))).slice(0, 3), style: ['mesh', 'minimal', 'type'].includes(it.style) ? it.style : 'mesh', cover: /^https:\/\//.test(it.cover || '') ? it.cover : '', link: /^https:\/\//.test(it.link || '') ? it.link : '' });
   const itemKey = it => ((it.artist || '') + '|' + (it.title || '')).toLowerCase();
@@ -204,10 +205,15 @@
     if (du && await imgOk(du)) return { u: du, answered };
     // 3) Apple straight from the browser (both storefronts), then by title alone
     const q = `https://itunes.apple.com/search?media=music&entity=${track ? 'song' : 'album'}&limit=12&term=${enc(a + ' ' + t)}`;
-    const ap = (await Promise.all(['US', 'KR'].map(c => apple(q + '&country=' + c, 'low', 5000).then(seen)))).flatMap(d => arr(d && d.results));
-    let hit = ap.find(x => okA(x.artistName) && looseEq(track ? x.trackName : x.collectionName, t));
+    const pr = o.prio || 'low';
+    let hit = null;
+    for (const c of ['US', 'KR']) {   // one storefront at a time: Apple only answers ~20 lookups a minute per person
+      const d = seen(await apple(q + '&country=' + c, pr, 5000));
+      hit = arr(d && d.results).find(x => okA(x.artistName) && looseEq(track ? x.trackName : x.collectionName, t));
+      if (hit || !d) break;
+    }
     if (!hit) {
-      const ap2 = seen(await apple(`https://itunes.apple.com/search?media=music&entity=${track ? 'song' : 'album'}&limit=25&country=US&term=${enc(t)}`, 'low', 5000));
+      const ap2 = seen(await apple(`https://itunes.apple.com/search?media=music&entity=${track ? 'song' : 'album'}&limit=25&country=US&term=${enc(t)}`, pr, 5000));
       hit = arr(ap2 && ap2.results).find(x => looseEq(track ? x.trackName : x.collectionName, t) && (okA(x.artistName) || core(x.artistName).slice(0, 4) === core(a).slice(0, 4)));
     }
     if (hit && await imgOk(art600(hit.artworkUrl100))) return { u: art600(hit.artworkUrl100), answered };
@@ -232,7 +238,7 @@
     const ask = () => api(`exists?type=${track ? 'track' : 'album'}&artist=${enc(r.artist)}&title=${enc(r.title)}`).catch(() => null);
     let m = await ask();
     if (!m || m.mb === null || m.mb === undefined) { await new Promise(res => setTimeout(res, 1500)); m = await ask(); }
-    if (m && m.mb === true) return (m.cover && await imgOk(m.cover)) ? { found: true, cover: m.cover, year: m.year || '', unsure: true } : { found: false, answered: false, mbOnly: true };   // known to MusicBrainz but no cover anywhere: not proof enough
+    if (m && m.mb === true) return (m.cover && await imgOk(thumb(m.cover))) ? { found: true, cover: m.cover, year: m.year || '', unsure: true } : { found: false, answered: false, mbOnly: true };   // known to MusicBrainz but no cover anywhere: not proof enough
     if (m && m.mb === false) return { found: false, answered: true };     // MusicBrainz has never heard of it either
     return { found: false, answered: appleAnswered };                     // MusicBrainz unreachable: Apple's "no" decides
   }
@@ -250,7 +256,7 @@
       const k = a.dataset.ck, c = coverMap[k];
       if (c && (c.u || Date.now() - c.t < 20 * 60000)) { if (c.u) a.insertAdjacentHTML('afterend', coverImg(c.u)); return; }
       if (Date.now() - (triedAt.get(k) || 0) < 120000) return;
-      if (!repairQ.has(k)) repairQ.set(k, { type: a.dataset.y, artist: a.dataset.a, title: a.dataset.t });
+      if (!repairQ.has(k)) repairQ.set(k, { type: a.dataset.y, artist: a.dataset.a, title: a.dataset.t, prio: a.closest('#music-recs') ? 'mid' : 'low' });
     });
     pumpCovers();
   }
@@ -259,7 +265,7 @@
     try {
       while (repairQ.size) {
         // four at a time
-        const batch = [...repairQ.entries()].slice(0, 4);
+        const batch = [...repairQ.entries()].sort((x, y) => (x[1].prio === 'mid' ? 0 : 1) - (y[1].prio === 'mid' ? 0 : 1)).slice(0, 4);
         await Promise.all(batch.map(async ([k, o]) => {
           let r = { u: '', answered: false }; try { r = await findCover(o); } catch (e) { /* keep r */ }
           repairQ.delete(k); triedAt.set(k, Date.now());
@@ -481,6 +487,8 @@
   chipSet($('#music-region'), REGIONS, () => O.region, v => (O.region = v));
   $('#music-era-from').innerHTML = '<option value="">처음부터</option>' + ERAS.map(y => `<option value="${y}">${y}년대</option>`).join('');
   $('#music-era-to').innerHTML = '<option value="">지금까지</option>' + ERAS.map(y => `<option value="${y}">${y}년대</option>`).join('');
+  // settings saved before the scale was turned around: flip them once
+  if (!O.scale2) { ['music-sim', 'music-pop'].forEach(id => { const v = +O[id]; if (v >= 1 && v <= 5) O[id] = String(6 - v); }); O.scale2 = true; }
   ['music-sim', 'music-pop', 'music-same', 'music-exclude', 'music-note', 'music-era-from', 'music-era-to', 'music-deep', 'music-share'].forEach(id => {
     const el = $('#' + id); const v = O[id];
     if (v !== undefined) { if (el.type === 'checkbox') el.checked = v; else el.value = v; }
@@ -493,11 +501,13 @@
   function presetDesc(s, p) { $('#music-preset-desc').textContent = O.preset ? PRESET_DESC[O.preset] : `직접 조절한 설정입니다 (유사도 ${s} · 인지도 ${p}).`; }
   const ranges = {};
   ['sim', 'pop'].forEach(k => {
-    const r = $(`#music-${k}`), out = $(`#music-${k}-out`), ticks = $$(`[data-range="music-${k}"] .ticks span`);
+    const r = $(`#music-${k}`), out = $(`#music-${k}-out`), ticks = $$(`[data-range="music-${k}"] .ticks span`), marks = $$(`[data-range="music-${k}"] .ruler i`), ruler = $(`[data-range="music-${k}"] .ruler`);
     const L = k === 'sim' ? SIM_LBL : POP_LBL;
-    const upd = () => { const v = +r.value; out.textContent = `${v} / 5 · ${L[v]}`; ticks.forEach((t, i) => t.classList.toggle('on', i + 1 === v)); };
+    const upd = () => { const v = +r.value; out.textContent = `${v} / 5 · ${L[v]}`; ticks.forEach((t, i) => t.classList.toggle('on', i + 1 === v)); marks.forEach((t, i) => t.classList.toggle('on', i + 1 === v)); if (ruler) ruler.style.setProperty('--p', String((v - 1) / 4)); };
     r.addEventListener('input', () => { upd(); syncPreset(); });
-    ticks.forEach((t, i) => t.addEventListener('click', () => { r.value = String(i + 1); r.dispatchEvent(new Event('input', { bubbles: true })); r.dispatchEvent(new Event('change', { bubbles: true })); }));
+    const pick = i => { r.value = String(i + 1); r.dispatchEvent(new Event('input', { bubbles: true })); r.dispatchEvent(new Event('change', { bubbles: true })); };
+    ticks.forEach((t, i) => t.addEventListener('click', () => pick(i)));
+    if (ruler) ruler.addEventListener('click', e => { const b = ruler.getBoundingClientRect(); pick(Math.max(0, Math.min(4, Math.floor((e.clientX - b.left) / b.width * 5)))); });
     ranges[k] = { r, upd }; upd();
   });
   function syncPreset() {
@@ -1023,7 +1033,7 @@
     const R = state.results.recs, fb = state.feedback;
     return {
       items: state.items.map(it => ({ type: it.type, artist: it.artist, title: it.title, year: it.year || '', rating: it.rating || 0 })),
-      opts: { n: O.n, format: O.format, vocal: O.vocal, sim: $('#music-sim').value, pop: $('#music-pop').value, eraFrom: $('#music-era-from').value, eraTo: $('#music-era-to').value, region: O.region, axes: O.axes, same: $('#music-same').checked, deep: $('#music-deep').checked, exclude: $('#music-exclude').value.trim(), note: $('#music-note').value.trim() },
+      opts: { n: O.n, format: O.format, vocal: O.vocal, sim: String(6 - +$('#music-sim').value), pop: String(6 - +$('#music-pop').value), eraFrom: $('#music-era-from').value, eraTo: $('#music-era-to').value, region: O.region, axes: O.axes, same: $('#music-same').checked, deep: $('#music-deep').checked, exclude: $('#music-exclude').value.trim(), note: $('#music-note').value.trim() },
       more: more ? { prev: R.map(recLabel), up: R.filter(r => fb[recKey(r)] === 'up').map(recLabel), down: R.filter(r => fb[recKey(r)] === 'down').map(recLabel) } : undefined,
     };
   }
@@ -1108,12 +1118,13 @@
       if (r.verified && !r.recheck) return;                      // the server confirmed it meanwhile
       if (r.recheck) {                                            // MusicBrainz knows it; Apple adds the details (or not)
         delete r.recheck;
-        if (!x.found && !(r.cover && /coverartarchive/.test(r.cover) && await imgOk(r.cover))) { r.verified = false; unconfirmed++; dropRec(r, true); return; }   // no Apple, no cover: not shown
-        if (!x.apple) { if (r.type === 'track') r.album = ''; else if (r.start_with) r.start_with = ''; r._chk = false; redraw(r); return; }
+        if (!x.found && !(r.cover && /coverartarchive/.test(r.cover) && await imgOk(thumb(r.cover)))) { r.verified = false; unconfirmed++; dropRec(r, true); return; }   // no Apple, no cover: not shown
+        if (!x.apple) { if (x.cover && !r.cover) r.cover = x.cover; if (r.type === 'track') r.album = ''; else if (r.start_with) r.start_with = ''; r._chk = false; redraw(r); return; }
       }
       if (x.found) {
         r.verified = true; r._chk = false;
         ['cover', 'link', 'year'].forEach(f => { if (x[f] && !r[f]) r[f] = x[f]; });
+        if (x.cover && (x.apple || !r.cover || badCover.has(r.cover) || /coverartarchive/.test(r.cover))) r.cover = x.cover;   // Apple's own artwork beats an archive guess
         if (r.type === 'track') {
           if (x.apple) { const al = String(x.apple.collectionName || '').replace(/ - (Single|EP)$/, ''); if (al && !looseEq(al, r.album || '')) r.album = al; }
           else r.album = '';                                      // can't vouch for the album name: leave it out
@@ -1241,7 +1252,8 @@
   /* ---------------- community data (server) ---------------- */
   const live = { feed: [], accounts: new Map(), picks: [], admins: [], ready: false, error: '' };
   // older posts fetched with [더보기]; merged with the newest page that refresh() brings
-  const older = new Map(); let feedMoreSrv = false, myMoreSrv = true, feedShown = 10, myShown = 10;
+  const older = new Map(); let feedMoreSrv = false, myMoreSrv = true, feedShown = 5, myShown = 10;
+  const FEED_STEP = 5;   // Community feed: five at a time
   const postNo = f => +String(f.id).slice(1) || 0;
   function allFeed() {
     const m = new Map(live.feed.map(f => [f.id, f]));
@@ -1254,7 +1266,7 @@
     arr(d.feed).forEach(f => older.set(f.id, f));
     if (user) myMoreSrv = !!d.more; else feedMoreSrv = !!d.more;
   }
-  const moreBtn = (attr, label = '더보기') => `<div class="list-more"><button class="btn" type="button" ${attr}>${label}</button></div>`;
+  const moreBtn = (attr, label = '더 보기') => `<div class="list-more"><button class="btn" type="button" ${attr}>${label}</button></div>`;
   const nameOf = key => (live.accounts.get(key) || {}).username || '탈퇴한 유저';
   const isAdmin = () => !!(auth && (auth.admin || live.admins.includes(auth.key)));
   const canAct = () => !!auth;
@@ -1413,7 +1425,7 @@
 
   /* ---------------- community page ---------------- */
   let feedFilter = 'all';
-  seg($('#feed-filter'), () => feedFilter, v => { feedFilter = v; feedShown = 10; renderCommunity(); });
+  seg($('#feed-filter'), () => feedFilter, v => { feedFilter = v; feedShown = FEED_STEP; renderCommunity(); });
   const tile = (it, ref, extra = '') => `<button class="tile" type="button" data-ref="${esc(ref)}"><span class="tc">${artHTML(it)}${extra}</span><b title="${esc(it.title)}">${esc(it.title)}</b><span>${esc(it.artist)}${it.year ? ' · ' + esc(it.year) : ''}</span></button>`;
   function postHTML(f) {
     const mine = auth && f.uname === auth.key, canDel = mine || isAdmin();
@@ -1448,7 +1460,7 @@
       : '<p class="rail-empty">오늘은 아직 아무도 고르지 않았습니다. 내 목록이나 소식의 앨범을 누른 뒤 “오늘의 추천으로 올리기”를 눌러 보세요.</p>';
     const list = allFeed().filter(f => feedFilter === 'all' || f.kind === feedFilter);
     $('#cfeed').innerHTML = (list.length ? list.slice(0, feedShown).map(postHTML).join('') : `<li class="rail-empty">${live.ready ? '해당하는 소식이 없습니다.' : '불러오고 있습니다…'}</li>`)
-      + (list.length > feedShown || (feedMoreSrv && list.length >= feedShown) ? `<li class="more-li">${moreBtn('data-feed-more', `더보기 (${Math.min(feedShown, list.length)}개 보는 중)`)}</li>` : '');
+      + (list.length > feedShown || (feedMoreSrv && list.length >= feedShown) ? `<li class="more-li">${moreBtn('data-feed-more', '더 보기')}</li>` : '');
     const us = usersSorted();
     $('#users-n').textContent = us.length ? us.length + '명' : '';
     $('#meta-comm').innerHTML = `<span>USERS ${us.length} · PICKS ${picks.length}</span><span>${STAMP}</span>`;
@@ -1494,8 +1506,8 @@
     if (fm) {
       const list = allFeed().filter(f => feedFilter === 'all' || f.kind === feedFilter);
       fm.disabled = true;
-      if (list.length < feedShown + 10 && feedMoreSrv) { try { await loadOlder(); } catch (er) { dbFail(er); } }
-      feedShown += 10; renderCommunity(); return;
+      if (list.length < feedShown + FEED_STEP && feedMoreSrv) { try { await loadOlder(); } catch (er) { dbFail(er); } }
+      feedShown += FEED_STEP; renderCommunity(); return;
     }
     const mm = e.target.closest('[data-my-more]');
     if (mm && auth) {

@@ -369,10 +369,19 @@ async function coverLookup(req) {
     const dh = d && arr(d.data).find(x => same(x.artist && x.artist.name, artist) && same(x.title, title));
     const dc = dh && okUrl((track ? dh.album : dh) && ((track ? dh.album : dh).cover_xl || (track ? dh.album : dh).cover_big), COVER_HOST);
     if (dc) return { cover: dc, from: 'deezer' };
-    if (!track) {
-      const s = seen(await getJson(`https://musicbrainz.org/ws/2/release-group?fmt=json&limit=5&query=${encodeURIComponent(`releasegroup:"${title.replace(/"/g, '')}" AND artist:"${artist.replace(/"/g, '')}"`)}`, { 'user-agent': UA }, 604800));
-      const rg = s && arr(s['release-groups']).find(x => same(x.title, title));
-      if (rg) return { cover: `https://coverartarchive.org/release-group/${rg.id}/front-250`, from: 'caa', year: String(rg['first-release-date'] || '').slice(0, 4) };
+    // MusicBrainz → Cover Art Archive (only a cover that really exists: CAA answers 404 when there's none)
+    const a = luceneWords(artist).toLowerCase(), t = luceneWords(title).toLowerCase();
+    if (a && t) {
+      const s = seen(await getJson(`https://musicbrainz.org/ws/2/${track ? 'recording' : 'release-group'}?fmt=json&limit=10&query=${encodeURIComponent(track ? `recording:(${t}) AND artist:(${a})` : `releasegroup:(${t}) AND artist:(${a})`)}`, { 'user-agent': UA }, 604800));
+      const credit = x => arr(x['artist-credit']).some(c => sameArtist(c.name || '', artist) || sameArtist((c.artist && c.artist.name) || '', artist));
+      const hits = arr(s && (track ? s.recordings : s['release-groups'])).filter(x => same(x.title, title) && credit(x));
+      // a song: the release groups it appears on, the artist's own albums / singles first
+      const groups = track ? [...new Map(hits.flatMap(h => arr(h.releases)).map(r => r['release-group']).filter(g => g && g.id).sort((x, y) => (x['primary-type'] === 'Album' ? 0 : 1) - (y['primary-type'] === 'Album' ? 0 : 1) || (arr(x['secondary-types']).length - arr(y['secondary-types']).length)).map(g => [g.id, g])).values()] : hits;
+      for (const g of groups.slice(0, 4)) {
+        const u = `https://coverartarchive.org/release-group/${g.id}/front-250`;
+        const ok = await fetch(u, { method: 'HEAD', redirect: 'manual', cf: { cacheTtl: 604800 }, signal: AbortSignal.timeout(5000) }).then(r => r.status >= 300 && r.status < 400 || r.ok).catch(() => false);
+        if (ok) return { cover: u, from: 'caa', year: track ? '' : String(g['first-release-date'] || '').slice(0, 4) };
+      }
     }
     return { cover: '', partial: !tried.ok };
   });
@@ -433,7 +442,7 @@ async function img(req) {
   const u = okUrl(new URL(req.url).searchParams.get('u'), COVER_HOST);
   if (!u) return fail(400, 'bad_url', '허용되지 않은 주소입니다.');
   try {
-    const r = await fetch(u, { cf: { cacheTtl: 604800, cacheEverything: true }, signal: AbortSignal.timeout(8000) });
+    const r = await fetch(u, { cf: { cacheTtl: 604800, cacheEverything: true }, signal: AbortSignal.timeout(12000) });   // the Cover Art Archive redirects to archive.org, which can be slow
     const type = r.headers.get('content-type') || '';
     if (!r.ok || !/^image\//.test(type)) return fail(502, 'img', '이미지를 가져오지 못했습니다.');
     return new Response(r.body, { headers: { 'content-type': type, 'cache-control': 'public, max-age=604800', 'access-control-allow-origin': '*' } });
@@ -807,7 +816,7 @@ async function health(env, req) {
   }
   const k = env.GEMINI_API_KEY || '';
   return json({
-    version: 2, build: '2026.11.01-0010', db, gemini_key: !!k,
+    version: 2, build: '2026.11.01-0930', db, gemini_key: !!k,
     gemini_key_format: k ? (k.trim() !== k ? 'has_spaces' : /^AQ\./.test(k) ? 'AQ' : /^AIza/.test(k) ? 'AIza' : 'unknown') : null,
     pin_pepper: !!env.PIN_PEPPER, admins: admins(env).length, models: modelList(env),
     deezer_here: new URL(req.url).searchParams.get('up') === '1' ? await deezerOpen() : undefined,
