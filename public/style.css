@@ -688,3 +688,26 @@ button,a,summary,label{-webkit-tap-highlight-color:transparent}
 #view-music details.settings{margin-top:calc(var(--lh) * .9em)!important}
 .range-ends{padding:0 calc(var(--rw) * .1 - .6em)}
 .kv.stack>.chips li{white-space:normal}.kv.stack>.chips .chip-toggle{white-space:normal;text-align:left}
+/* v4.2 — log-in pop-up on arrival */
+.join-pop{display:grid;row-gap:calc(var(--lh) * .55em);padding-top:.4em}
+.join-pop>.sec{font-size:1.704em;line-height:1.05;align-items:center}
+.join-pop>.sec::before,.join-pop>.sec::after{font-size:.587em;min-width:1.5em}
+.join-pop .jp-lead{text-align:center}
+.join-pop form{display:grid;row-gap:calc(var(--lh) * .5em)}
+.join-pop .kv{grid-template-columns:4.2em minmax(0,1fr);align-items:baseline}
+.join-pop input{font-size:max(16px,1em)}
+.join-pop input.pin{letter-spacing:.5em}
+.join-pop .jp-go{height:4.2em;margin-top:.3em}
+.join-pop .jp-go .bar-lbl{font-size:1.7em}
+.join-pop .jp-later{text-align:center}
+.join-pop .hint{font-size:.92em}
+/* v4.2 — OPTIONS: room under the heading and between the rows (easier to read and to tap) */
+details.settings>summary{row-gap:calc(var(--lh) * .5em);padding-bottom:calc(var(--lh) * .25em)}
+details.settings>summary .sum-desc{line-height:1.6;margin-top:calc(var(--lh) * .3em)}
+details.settings>summary .chev{margin-top:calc(var(--lh) * .1em)}
+.set-body{padding-top:calc(var(--lh) * .9em)}
+.set-group .kv,.set-group .check{margin-bottom:calc(var(--lh) * .85em)}
+.set-group .kv.stack{row-gap:calc(var(--lh) * .3em)}
+.set-group .seg,.set-group .chips{row-gap:calc(var(--lh) * .35em)}
+.set-group+.set-group{margin-top:calc(var(--lh) * .3em)}
+.kv.stack>.chips li:last-child:nth-child(odd){grid-column:1/-1}

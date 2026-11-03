@@ -1,7 +1,7 @@
 
 (() => {
   'use strict';
-  const BUILD = '2026.11.01-0930';   // also shown at the bottom of the page and in /api/health — tells which version a browser is running
+  const BUILD = '2026.11.03-1240';   // also shown at the bottom of the page and in /api/health — tells which version a browser is running
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -117,6 +117,18 @@
     AP.log.push(t);
     return jsonp(url, ms).then(d => { if (!d) AP.coolUntil = Date.now() + 30000; return d; });
   }
+  // the same, but when the minute's allowance is used up it waits for room (up to maxWait) instead of giving up:
+  // a recommendation check must really ask Apple before anything is judged
+  async function appleWait(url, prio, maxWait = 20000) {
+    const end = Date.now() + maxWait;
+    for (;;) {
+      const before = AP.denied, d = await apple(url, prio);
+      if (d || AP.denied === before || Date.now() >= end) return d;      // answered, or failed for real, or out of time
+      const t = Date.now(); AP.log = AP.log.filter(x => t - x < 60000);
+      const free = AP.log.length ? 60000 - (t - AP.log[0]) + 300 : 1000;
+      await new Promise(r => setTimeout(r, Math.max(500, Math.min(free, end - Date.now()))));
+    }
+  }
   // when the allowance frees up again (ms from now)
   const appleSpare = () => { const t = Date.now(); return AP.log.filter(x => t - x < 60000).length < 10; };
   const appleFreeIn = () => { const t = Date.now(); AP.log = AP.log.filter(x => t - x < 60000); return AP.log.length < 18 ? 0 : 60000 - (t - AP.log[0]) + 300; };
@@ -141,7 +153,7 @@
 
   /* ---------------- covers: find a missing or broken cover, remember it ---------------- */
   // loose title matching: accents, brackets, "- Single", deluxe/remaster tags and "the" don't matter
-  const fold = s => String(s || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/&/g, ' and ').replace(/(^|\s)['’]?n['’]?(?=\s)/g, ' and ').replace(/[’'`´]/g, '');
+  const fold = s => String(s || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').normalize('NFC').replace(/&/g, ' and ').replace(/(^|\s)['’]?n['’]?(?=\s)/g, ' and ').replace(/[’'`´]/g, '');
   const core = s => fold(s).replace(/\(.*?\)|\[.*?\]/g, ' ').replace(/\s[-–—]\s.*$/, ' ').replace(/\b(feat|ft|with)\b\.?.*$/, ' ')
     .replace(/\b(deluxe|expanded|edition|remaster(ed)?|anniversary|version|bonus|tracks?|reissue|mono|stereo)\b/g, ' ').replace(/^\s*the\s+/, '')
     .replace(/[^a-z0-9぀-ヿ㐀-鿿가-힣]+/g, '');
@@ -226,8 +238,10 @@
     const track = r.type === 'track';
     const q = `https://itunes.apple.com/search?media=music&entity=${track ? 'song' : 'album'}&limit=15&term=${enc(r.artist + ' ' + r.title)}`;
     let appleAnswered = false, a = null;
-    for (const c of ['US', 'KR']) {
-      const d = await apple(q + '&country=' + c, 'mid'); if (d) appleAnswered = true;
+    const home = /한국/.test(r.country || '') ? 'KR' : /일본/.test(r.country || '') ? 'JP' : storeOf(r.artist + ' ' + r.title);
+    // Japanese records: Japan's store first (they're filed there under their own script); two storefronts at most
+    for (const c of home === 'US' ? ['US', 'KR'] : [home, 'US']) {
+      const d = await appleWait(q + '&country=' + c, 'mid'); if (d) appleAnswered = true;
       a = arr(d && d.results).find(x => sameArtist(x.artistName, r.artist) && sameTitle(track ? x.trackName : x.collectionName, r.title));
       if (a) { a.country = c; break; }
     }
@@ -239,7 +253,7 @@
     let m = await ask();
     if (!m || m.mb === null || m.mb === undefined) { await new Promise(res => setTimeout(res, 1500)); m = await ask(); }
     if (m && m.mb === true) return (m.cover && await imgOk(thumb(m.cover))) ? { found: true, cover: m.cover, year: m.year || '', unsure: true } : { found: false, answered: false, mbOnly: true };   // known to MusicBrainz but no cover anywhere: not proof enough
-    if (m && m.mb === false) return { found: false, answered: true };     // MusicBrainz has never heard of it either
+    if (m && m.mb === false) return { found: false, answered: appleAnswered };   // made up only when Apple said no too
     return { found: false, answered: appleAnswered };                     // MusicBrainz unreachable: Apple's "no" decides
   }
   // the real tracklist of an Apple album (one lookup)
@@ -608,16 +622,19 @@
   }
 
   /* ---------------- search: type a couple of letters, tap to add (Apple Music + Deezer) ---------------- */
-  const S = { appleOk: new Set(), srv: new Map(), q: '', seq: 0, t: 0, view: '', rows: [], idx: -1, cache: new Map(), pool: new Map(), artists: new Map(), artistName: '', showSingles: false, chart: null, quick: null };
+  const S = { appleOk: new Set(), srv: new Map(), q: '', seq: 0, t: 0, view: '', rows: [], idx: -1, cache: new Map(), pool: new Map(), artists: new Map(), aka: new Map(), artistName: '', showSingles: false, chart: null, quick: null };
   const qEl = $('#music-q'), acEl = $('#music-ac');
   const inList = it => state.items.some(x => itemKey(x) === itemKey(it));
   const isCJK = s => /[぀-ヿ㐀-鿿가-힣]/.test(s);
+  // the Apple storefront that fits the script: Hangul → Korea, kana / kanji → Japan, anything else → US (the fullest)
+  const storeOf = s => /[가-힣]/.test(s) ? 'KR' : /[぀-ヿ㐀-鿿]/.test(s) ? 'JP' : 'US';
   const words = s => fold(s).split(/[^a-z0-9぀-ヿ㐀-鿿가-힣]+/).filter(Boolean);
   const COMPIL = /\b(collection|greatest hits|best of|anthology|essentials?|the very best|gold|definitive|playlist|hits)\b/i;
   const JUNK = /karaoke|tribute|made famous|in the style of|cover version|lullaby|8-?bit|piano version|instrumental version/i;
   function textScore(q, it) {
     const toks = words(q); if (!toks.length) return 0;
-    const tw = words(it.title), aw = words(it.artist), tc = core(it.title), ac = core(it.artist), qc = core(q);
+    const aka = it.aka || S.aka.get(core(it.artist)) || '';   // "Sheena Ringo" for 椎名林檎
+    const tw = words(it.title), aw = words(it.artist + ' ' + aka), tc = core(it.title), ac = core(it.artist) + '|' + core(aka), qc = core(q);
     let s = 0;
     for (const k of toks) {
       if (tw.some(w => w.startsWith(k))) s += 3;
@@ -628,7 +645,7 @@
       else return -1;
     }
     if (qc && tc === qc) s += 4; else if (qc && tc.startsWith(qc)) s += 2.5;
-    if (qc && ac === qc) s += 4.5;   // the artist's own name typed: their records first
+    if (qc && (core(it.artist) === qc || (aka && core(aka) === qc) || (aka && words(aka).sort().join('') === words(q).sort().join('')))) s += 4.5;   // the artist's own name typed: their records first
     return s;
   }
   // one shape for every catalogue
@@ -659,7 +676,7 @@
   function sources(q) {
     let s = S.cache.get(q);
     if (!s) {
-      const store = /[가-힣]/.test(q) ? 'KR' : 'US', reuse = appleCovered(q);
+      const store = storeOf(q), reuse = appleCovered(q);
       s = {
         // Apple, in the store that fits the words: Hangul → Korea, anything else → US (the fullest catalogue).
         // Skipped when an earlier, shorter search already answers it.
@@ -671,8 +688,13 @@
         tr: dz(`search/track?limit=15&q=${enc(q)}`),
         ar: dz(`search/artist?limit=5&q=${enc(q)}`),
         // our server asks MusicBrainz (albums Apple doesn't sell are there too)
-        srv: q.length >= 3 ? new Promise(r => setTimeout(r, 450)).then(() => (S.q === q || qEl.value.trim() === q ? api('search?q=' + enc(q)).catch(() => null) : null)) : Promise.resolve(null),
+        srv: q.length >= 2 ? new Promise(r => setTimeout(r, 450)).then(() => (S.q === q || qEl.value.trim() === q ? api('search?q=' + enc(q)).catch(() => null) : null)) : Promise.resolve(null),
       };
+      // the server found the artist under another name (椎名林檎 for "sheena ringo"): ask Apple for that name too
+      s.nat = s.srv.then(d => {
+        const ar = arr(d && d.artists)[0]; if (!ar || !ar.name || core(ar.name) === core(q)) return null;
+        return apple(`https://itunes.apple.com/search?media=music&entity=album&limit=25&country=${storeOf(ar.name)}&term=${enc(ar.name)}`, 'high', 5000);
+      });
       S.cache.set(q, s); if (S.cache.size > 80) S.cache.delete(S.cache.keys().next().value);
     }
     return s;
@@ -684,10 +706,13 @@
     if (got.songs) add(arr(got.songs.results).flatMap(fromApple), 1.6);
     if (got.al) add(arr(got.al.data).map(fromDzAlbum), 1.6);
     if (got.tr) add(arr(got.tr.data).flatMap(fromDzTrack), 1.2);
+    if (got.srv) arr(got.srv.artists).forEach(x => { if (x.name && x.aka) S.aka.set(core(x.name), x.aka); });
     if (got.srv) add(arr(got.srv.items).map(x => ({ ...x })), 1.7);   // MusicBrainz albums through our server
+    if (got.nat) add(arr(got.nat.results).flatMap(fromApple), 1.8);   // Apple, under the artist's own name
     const artists = new Map();
     const artistAdd = (name, w, dzId) => { if (!name) return; const k = core(name); if (!k) return; const a = artists.get(k) || { name, w: 0, dzId: 0 }; a.w += w; if (dzId) a.dzId = dzId; artists.set(k, a); };
     if (got.ar) arr(got.ar.data).forEach((x, i) => artistAdd(x.name, 2 + Math.log10((x.nb_fan || 0) + 1) * .4 - i * .3, x.id));
+    if (got.srv) arr(got.srv.artists).forEach(x => { if (!x.name) return; const k = core(x.name) + (x.arid ? '|' + x.arid : ''); artists.set(k, { name: x.name, aka: x.aka || '', arid: x.arid || '', w: 3, dzId: 0 }); });
     return { rank, artists };
   }
   function results(q, m) {
@@ -713,7 +738,8 @@
     const cand = new Map(m ? m.artists : []);
     // artists with the same name are kept apart by their MusicBrainz id (there are several "Black Star"s)
     scored.slice(0, 40).forEach(([v, it]) => {
-      const nk = core(it.artist), k = it.arid ? nk + '|' + it.arid : nk;
+      const nk = core(it.artist), ided = !it.arid && [...cand.keys()].filter(c => c.startsWith(nk + '|'));
+      const k = it.arid ? nk + '|' + it.arid : ided && ided.length === 1 ? ided[0] : nk;   // a name without an id joins the one artist of that name that has one
       let a = cand.get(k);
       if (!a && it.arid && cand.has(nk) && !cand.get(nk).arid) { a = cand.get(nk); cand.delete(nk); }    // an Apple/Deezer name meets its MusicBrainz id
       a = a || { name: it.artist, w: 0, dzId: 0 };
@@ -723,9 +749,10 @@
     const sameName = new Map(); cand.forEach(a => { const nk = core(a.name); sameName.set(nk, (sameName.get(nk) || 0) + 1); });
     const arts = [...cand.entries()].map(([key, a]) => {
       const k = core(a.name);
-      const ws = words(a.name), toks = words(q);
+      const aka = a.aka || S.aka.get(k) || '', ws = words(a.name + ' ' + aka), toks = words(q);
       let s = toks.every(t => ws.some(w => w.startsWith(t)) || k.includes(t)) ? 2 : -9;
-      if (k === qc) s += 4; else if (k.startsWith(qc)) s += 2;
+      if (k === qc || (aka && words(aka).sort().join('') === toks.slice().sort().join(''))) s += 4; else if (k.startsWith(qc)) s += 2;
+      if (aka && !a.aka) a.aka = aka;
       return { ...a, s: s + a.w };
     }).filter(a => a.s >= 2.6).sort((x, y) => y.s - x.s).slice(0, 3);
     arts.forEach(a => { if (sameName.get(core(a.name)) < 2) delete a.hint; S.artists.set(core(a.name) + (a.arid ? '|' + a.arid : ''), a); });
@@ -741,7 +768,7 @@
   }
   function rowArtist(a) {
     const n = S.rows.push({ kind: 'artist', a }) - 1;
-    return `<button type="button" class="ac-art" role="option" id="aco-${n}" data-n="${n}"><span>${esc(a.name)}${a.hint ? ` <small>· ${esc(a.hint)}</small>` : ''}</span><span>앨범 전체 보기</span></button>`;
+    return `<button type="button" class="ac-art" role="option" id="aco-${n}" data-n="${n}"><span>${esc(a.name)}${a.aka && core(a.aka) !== core(a.name) ? ` <small>(${esc(a.aka)})</small>` : ''}${a.hint ? ` <small>· ${esc(a.hint)}</small>` : ''}</span><span>앨범 전체 보기</span></button>`;
   }
   const head = (l, r = '') => `<div class="ac-h"><span>${l}</span>${r}</div>`;
   const closeBtn = '<button type="button" class="ac-close" data-ac-close>닫기</button>';
@@ -800,8 +827,8 @@
       const srvP = api(`artist?name=${enc(a.name)}${a.arid ? '&mbid=' + a.arid : ''}`).catch(() => null);
       const [al, alUS, so, dzA] = await Promise.all([
         Promise.resolve(null),
-        apple(`https://itunes.apple.com/search?media=music&entity=album&attribute=artistTerm&limit=100&country=${/[가-힣]/.test(a.name) ? 'KR' : 'US'}&term=${enc(a.name)}`, a.bg ? 'low' : 'high'),
-        a.bg ? Promise.resolve(null) : apple(`https://itunes.apple.com/search?media=music&entity=song&attribute=artistTerm&limit=25&country=${/[가-힣]/.test(a.name) ? 'KR' : 'US'}&term=${enc(a.name)}`, 'high'),
+        apple(`https://itunes.apple.com/search?media=music&entity=album&attribute=artistTerm&limit=100&country=${storeOf(a.name)}&term=${enc(a.name)}`, a.bg ? 'low' : 'high'),
+        a.bg ? Promise.resolve(null) : apple(`https://itunes.apple.com/search?media=music&entity=song&attribute=artistTerm&limit=25&country=${storeOf(a.name)}&term=${enc(a.name)}`, 'high'),
         a.dzId ? Promise.all([dz(`artist/${a.dzId}/albums?limit=60`), dz(`artist/${a.dzId}/top?limit=10`)]) : Promise.resolve([null, null]),
       ]);
       const mine = it => core(it.artist) === key || looseEq(it.artist, a.name);
@@ -1322,17 +1349,40 @@
         <p class="err" id="join-err" hidden></p>
         <p class="hint">* 처음 쓰는 이름이면 자동으로 가입됩니다.<br>* 4자리 코드는 잊으면 찾을 수 없습니다.</p>
       </form>`;
-    $('#join-form').addEventListener('submit', async e => {
+    bindJoin('join');
+  }
+  // one submit for both join forms (the side panel's and the pop-up's); ids are <p>-form, <p>-name, <p>-pin, <p>-err
+  function bindJoin(p, after) {
+    $(`#${p}-form`).addEventListener('submit', async e => {
       e.preventDefault();
-      const username = $('#join-name').value.trim(), pin = $('#join-pin').value.trim(), err = $('#join-err');
+      const username = $(`#${p}-name`).value.trim(), pin = $(`#${p}-pin`).value.trim(), err = $(`#${p}-err`);
       err.hidden = true;
       if (!/^[0-9A-Za-z가-힣_]{2,12}$/.test(username)) { err.textContent = 'Username은 한글·영문·숫자·밑줄로 2~12자여야 합니다.'; err.hidden = false; return; }
       if (!/^\d{4}$/.test(pin)) { err.textContent = '코드는 숫자 4자리여야 합니다.'; err.hidden = false; return; }
-      const btn = $('#join-form button[type=submit]'); btn.disabled = true;
-      try { await join(username, pin); }
-      catch (er) { if ($('#join-err')) { $('#join-err').textContent = sErr(er); $('#join-err').hidden = false; } }
-      finally { if ($('#join-form button[type=submit]')) $('#join-form button[type=submit]').disabled = false; }
+      const btn = $(`#${p}-form button[type=submit]`); btn.disabled = true;
+      try { await join(username, pin); if (after) after(); }
+      catch (er) { if ($(`#${p}-err`)) { $(`#${p}-err`).textContent = sErr(er); $(`#${p}-err`).hidden = false; } }
+      finally { if ($(`#${p}-form button[type=submit]`)) $(`#${p}-form button[type=submit]`).disabled = false; }
     });
+  }
+  // the log-in pop-up: shown when the site opens and nobody is logged in (once per visit — closing it lets you look around)
+  function openJoinPopup() {
+    if (auth || !$('#modal').hidden) return;
+    openModal(`<div class="join-pop">
+      <h3 class="sec">JOIN</h3>
+      <p class="jp-lead">이름과 숫자 4자리 코드를 입력하면 로그인됩니다.<br>처음 쓰는 이름이면 자동으로 가입됩니다.</p>
+      <form id="jm-form" autocomplete="off">
+        <div class="kv"><label class="k" for="jm-name">NAME</label><input type="text" id="jm-name" placeholder="Username" maxlength="12" autocomplete="username"></div>
+        <div class="kv"><label class="k" for="jm-pin">CODE</label><input class="pin" type="password" id="jm-pin" placeholder="0000" inputmode="numeric" maxlength="4" autocomplete="current-password"></div>
+        <p class="err" id="jm-err" hidden></p>
+        <button class="btn-bar jp-go" type="submit"><span class="bar-lbl">JOIN</span></button>
+      </form>
+      <p class="hint">* 4자리 코드는 잊으면 찾을 수 없습니다.<br>* 로그인하면 담은 음악과 추천이 Community에 공유됩니다.</p>
+      <div class="jp-later"><button class="linkish" type="button" data-join-later>로그인 없이 둘러보기</button></div>
+    </div>`, { join: true });
+    $('#modal .modal-card').setAttribute('aria-label', '로그인');
+    bindJoin('jm', () => { closeModal(); renderAcct(); });
+    if (matchMedia('(hover: hover) and (pointer: fine)').matches) $('#jm-name').focus();   // phones: no keyboard jumping up on arrival
   }
   $('#acct').addEventListener('click', async e => {
     if (e.target.closest('[data-logout]')) { api('logout', { method: 'POST' }).catch(() => {}); auth = null; saveAuth(); resetLocal(); toast('로그아웃했습니다'); renderAllComm(); return; }
@@ -1523,7 +1573,7 @@
   let modalCtx = null;
   const infoCache = new Map();
   function openModal(html, ctx) { modalCtx = ctx; $('#modal-body').innerHTML = html; $('#modal').hidden = false; $('#modal-x').focus(); }
-  function closeModal() { $('#modal').hidden = true; modalCtx = null; }
+  function closeModal() { $('#modal').hidden = true; modalCtx = null; $('#modal .modal-card').setAttribute('aria-label', '상세 정보'); }
   $('#modal-x').addEventListener('click', closeModal);
   $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeModal(); });
   document.addEventListener('keydown', e => { if (e.key === 'Escape') { if (!$('#modal').hidden) closeModal(); setSide(false); } });
@@ -1574,6 +1624,7 @@
     ctx.loading = false;
     if (modalCtx && modalCtx.ref === ref) $('#modal-body').innerHTML = detailHTML(ctx);
   }
+  $('#modal-body').addEventListener('click', e => { if (e.target.closest('[data-join-later]')) closeModal(); });
   $('#modal-body').addEventListener('click', e => {
     const t = e.target.closest('[data-ptab]');
     if (t && modalCtx && modalCtx.kind === 'profile') { modalCtx.tab = t.dataset.ptab; renderProfileModal(); return; }
@@ -1667,6 +1718,11 @@
   setView(location.hash ? location.hash.slice(1) : 'music');
   if (auth) pullLib();
   refresh();
+  // not logged in: the log-in pop-up opens on arrival (phones and computers alike), once per visit
+  if (!auth) {
+    let asked = false; try { asked = !!sessionStorage.getItem('jukebox.v2.joinAsked'); sessionStorage.setItem('jukebox.v2.joinAsked', '1'); } catch (e) { /* private mode: ask every time */ }
+    if (!asked) setTimeout(openJoinPopup, 350);
+  }
   if (!state.isExample && state.items.some(it => it.pending || !it.cover)) enrich(state.items.filter(it => !it.cover).slice(0, 30));
   setInterval(() => { if (document.visibilityState === 'visible') renderRail(); }, 60000);
 })();

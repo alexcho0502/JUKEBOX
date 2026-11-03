@@ -255,12 +255,12 @@ async function adminUnlock(env, me, key) {
 }
 
 /* ---------------- catalogue helpers (Apple iTunes Search + MusicBrainz) ---------------- */
-const norm = t => String(t || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/&/g, ' and ').replace(/(^|\s)['’]?n['’]?(?=\s)/g, ' and ').replace(/[’'`]/g, '')
-  .replace(/\(.*?\)|\[.*?\]|\s-\s(single|ep)$|feat\..*$|-\s*(\d{4}\s*)?remaster.*$/g, '').replace(/^the\s+/, '').replace(/[^a-z0-9가-힣]+/g, '');
+const norm = t => String(t || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').normalize('NFC').replace(/&/g, ' and ').replace(/(^|\s)['’]?n['’]?(?=\s)/g, ' and ').replace(/[’'`]/g, '')
+  .replace(/\(.*?\)|\[.*?\]|\s-\s(single|ep)$|feat\..*$|-\s*(\d{4}\s*)?remaster.*$/g, '').replace(/^the\s+/, '').replace(/[^a-z0-9가-힣぀-ヿ㐀-鿿]+/g, '');
 const same = (a, b) => { const x = norm(a), y = norm(b); return !!x && !!y && (x === y || (x.length > 4 && y.length > 4 && (x.includes(y) || y.includes(x)))); };
 // "does it exist" needs the exact name: a title that merely contains another one ("Sleepwalking" in "Sleepwalking Again")
 // or an artist that merely contains another ("Tambourines" in "The Black Tambourines") is a different record.
-const words = t => String(t || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/&/g, ' and ').replace(/[’'`]/g, '')
+const words = t => String(t || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').normalize('NFC').replace(/&/g, ' and ').replace(/[’'`]/g, '')
   .replace(/\(.*?\)|\[.*?\]/g, ' ').split(/[^a-z0-9가-힣぀-ヿ㐀-鿿]+/).filter(Boolean);
 const JOIN = new Set(['and', 'with', 'feat', 'ft', 'featuring', 'x', 'vs']);
 const sameTitle = (a, b) => { const x = norm(a), y = norm(b); return !!x && x === y; };
@@ -315,20 +315,45 @@ async function albumTracks(album) {
   const d = await getJson(u.toString());
   return d ? arr(d.results).filter(x => x.wrapperType === 'track').map(x => x.trackName) : [];
 }
-// MusicBrainz knows nearly every released record: true = exists, false = no such record, null = couldn't ask
+// every name an artist goes by on MusicBrainz: the name, the sort name ("Yamashita, Tatsuro") and aliases ("Tatsuro Yamashita")
+const artistForms = ar => [ar.name, ar['sort-name'], ...arr(ar.aliases).flatMap(x => [x.name, x['sort-name']])].filter(Boolean);
+const sameWords = (x, y) => { const p = words(x).filter(w => w !== 'the').sort().join(' '), q = words(y).filter(w => w !== 'the').sort().join(' '); return !!p && p === q; };
+// the MusicBrainz ids of the artist(s) this name belongs to, in any script ("Hikaru Utada" → 宇多田ヒカル)
+async function artistIds(name) {
+  const a = luceneWords(name).toLowerCase(); if (!a) return null;
+  const d = await getJson(`https://musicbrainz.org/ws/2/artist?fmt=json&limit=10&query=${encodeURIComponent(`alias:(${a}) OR sortname:(${a}) OR artist:(${a})`)}`, { 'user-agent': UA }, 604800);
+  if (!d) return null;
+  return arr(d.artists).filter(ar => (ar.score || 0) >= 50 && artistForms(ar).some(f => sameArtist(f, name) || sameWords(f, name))).slice(0, 4).map(ar => ar.id);
+}
+// MusicBrainz knows nearly every released record: true = exists, false = no such record, null = couldn't ask.
+// Japanese (and Korean) records are filed under their own script, while the engine or the list may write them romanized:
+// the title also matches the group's other releases (romanized pseudo-releases), and the artist matches by any alias.
 async function mbExists(type, artist, title) {
   const a = luceneWords(artist).toLowerCase(), t = luceneWords(title).toLowerCase();
   if (!a || !t) return { mb: null };
-  const ent = type === 'track' ? 'recording' : 'release-group';
-  const q = type === 'track' ? `recording:(${t}) AND artist:(${a})` : `releasegroup:(${t}) AND artist:(${a})`;
-  const s = await getJson(`https://musicbrainz.org/ws/2/${ent}?fmt=json&limit=15&query=${encodeURIComponent(q)}`, { 'user-agent': UA }, 604800);
-  if (!s) return { mb: null };
-  const list = arr(type === 'track' ? s.recordings : s['release-groups']);
+  const track = type === 'track', ent = track ? 'recording' : 'release-group';
+  const tq = track ? `recording:(${t})` : `(releasegroup:(${t}) OR release:(${t}))`;
+  const ask = q => getJson(`https://musicbrainz.org/ws/2/${ent}?fmt=json&limit=15&query=${encodeURIComponent(q)}`, { 'user-agent': UA }, 604800);
+  const listOf = s => arr(track ? s.recordings : s['release-groups']);
+  const titleOk = x => sameTitle(x.title, title) || (!track && arr(x.releases).some(r => sameTitle(r.title, title)));
   const credit = x => { const c = arr(x['artist-credit']); return [c.map(k => (k.name || '') + (k.joinphrase || '')).join(''), ...c.map(k => k.name), ...c.map(k => k.artist && k.artist.name)]; };
-  const hit = list.find(x => sameTitle(x.title, title) && credit(x).some(n => n && sameArtist(n, artist)));
-  if (!hit) return { mb: false };
-  const rg = type === 'track' ? (arr(hit.releases).map(x => x['release-group']).find(Boolean) || {}).id : hit.id;
-  return { mb: true, cover: rg ? `https://coverartarchive.org/release-group/${rg}/front-250` : '', year: String(hit['first-release-date'] || '').slice(0, 4) };
+  const found = hit => {
+    const rg = track ? (arr(hit.releases).map(x => x['release-group']).find(Boolean) || {}).id : hit.id;
+    return { mb: true, cover: rg ? `https://coverartarchive.org/release-group/${rg}/front-250` : '', year: String(hit['first-release-date'] || '').slice(0, 4) };
+  };
+  // 1) under the name as written
+  const s = await ask(`${tq} AND artist:(${a})`);
+  if (!s) return { mb: null };
+  const hit = listOf(s).find(x => titleOk(x) && credit(x).some(n => n && sameArtist(n, artist)));
+  if (hit) return found(hit);
+  // 2) under any name the artist goes by
+  const ids = await artistIds(artist);
+  if (ids === null) return { mb: null };
+  if (!ids.length) return { mb: false };
+  const s2 = await ask(`${tq} AND arid:(${ids.join(' OR ')})`);
+  if (!s2) return { mb: null };
+  const hit2 = listOf(s2).find(titleOk);
+  return hit2 ? found(hit2) : { mb: false };
 }
 // GET /api/exists?type=&artist=&title= — the browser's last check before it drops a recommendation
 async function existsLookup(req) {
@@ -336,8 +361,8 @@ async function existsLookup(req) {
   if (!artist || !title) return json({ mb: null });
   return cached(req, 86400 * 7, async () => { const r = await mbExists(p.get('type') === 'track' ? 'track' : 'album', artist, title); return { ...r, partial: r.mb === null }; });
 }
-async function findSong(artist, title) {
-  const raw = await itunesRaw({ term: `${artist} ${title}`, entity: 'song', limit: '15' });
+async function findSong(artist, title, c = 'US') {
+  const raw = await itunesRaw({ term: `${artist} ${title}`, entity: 'song', limit: '15' }, c);
   const list = arr(raw).filter(x => sameArtist(x.artistName, artist) && sameTitle(x.trackName, title));
   const original = list.find(x => !/greatest|best of|hits|collection|anthology|essential|live/i.test(x.collectionName)) || list[0];
   return { answered: !!raw, albums: list.map(x => x.collectionName), first: original ? original.collectionName : '', cover: original ? art600(original.artworkUrl100) : '', link: original ? okUrl(original.trackViewUrl, LINK_HOST) : '' };
@@ -415,19 +440,57 @@ async function artistLookup(req) {
     return { mb, albums, songs, partial: !mbA && !usA };
   });
 }
+// A name typed the way Koreans meet it — romanized ("sheena ringo", "gushima naoko") or in Hangul ("방탄소년단") — while
+// MusicBrainz files the artist under another script or spelling (椎名林檎, 具島直子, BTS). The artist index also searches
+// aliases and sort names, so it knows both. Returns the artist whose alias / sort name the query starts with (word order
+// doesn't matter: "naoko gushima" = "Gushima, Naoko"), and the words left over (maybe part of a title).
+async function aliasArtist(qWords) {
+  const qs = qWords.join(' ');
+  const d = await getJson(`https://musicbrainz.org/ws/2/artist?fmt=json&limit=10&query=${encodeURIComponent(`alias:(${qs}) OR sortname:(${qs}) OR artist:(${qs})`)}`, { 'user-agent': UA }, 604800);
+  if (!d) return { failed: true };
+  let best = null;
+  for (const ar of arr(d.artists).slice(0, 10)) {
+    if ((ar.score || 0) < 60) continue;
+    const forms = [[ar.name, 'name'], [ar['sort-name'], 'sort'], ...arr(ar.aliases).flatMap(x => [[x.name, 'alias'], [x['sort-name'], 'sort']])];
+    for (const [form, how] of forms) {
+      const fw = words(form); if (!fw.length) continue;
+      const left = [...qWords]; let ok = true;
+      for (const w of fw) { const i = left.indexOf(w); if (i < 0) { ok = false; break; } left.splice(i, 1); }
+      if (!ok) continue;
+      // one-word names only when they are the whole query and not tiny ("ringo" alone is anyone's)
+      if (fw.length === 1 && (left.length || fw[0].length < (/^[a-z0-9]+$/.test(fw[0]) ? 4 : 2))) continue;
+      const covered = fw.length, rank = covered * 100 + (ar.score || 0) + (how === 'name' ? 0 : 1);
+      if (!best || rank > best.rank) best = { id: ar.id, name: ar.name, how, aka: String(form).replace(/^([^,]+),\s*(.+)$/, how === 'sort' && /^[\x00-\x7f]+$/.test(form) ? '$1 $2' : '$&'), left, rank };
+    }
+  }
+  return best || {};
+}
 // GET /api/search?q= — albums from MusicBrainz (reachable from our server; Apple and Deezer refuse it)
 async function searchLookup(req) {
   const q = luceneWords(clip(new URL(req.url).searchParams.get('q'), 80)).toLowerCase();   // lower case: AND/OR/NOT stay plain words
   if (q.length < 2) return json({ items: [] });
   return cached(req, 3600, async () => {
-    const words = q.split(' ').filter(w => w.length > 0 && !/^(and|or|not|the|a|of)$/.test(w)).slice(0, 8);
+    const ws = q.split(' ').filter(w => w.length > 0 && !/^(and|or|not|the|a|of)$/.test(w)).slice(0, 8);
     const types = '(primarytype:album OR primarytype:ep)';
-    const strict = `${words.map(w => `(releasegroup:${w} OR artist:${w} OR artistname:${w})`).join(' AND ')} AND ${types}`;
+    const strict = `${ws.map(w => `(releasegroup:${w} OR artist:${w} OR artistname:${w})`).join(' AND ')} AND ${types}`;
     const loose = `(releasegroup:(${q}) OR artist:(${q})) AND ${types}`;
     const ask = query => getJson(`https://musicbrainz.org/ws/2/release-group?fmt=json&limit=40&query=${encodeURIComponent(query)}`, { 'user-agent': UA }, 86400);
-    let s = words.length ? await ask(strict) : null;
-    if (!words.length || (s && !arr(s['release-groups']).length)) s = await ask(loose);
-    return { items: arr(s && s['release-groups']).filter(rg => (rg.score || 0) >= 30).map(rg => fromMbRg(rg)).filter(x => x.title && x.artist), partial: !s };
+    const qWords = words(q);
+    const [s0, al] = await Promise.all([ws.length ? ask(strict) : null, qWords.length ? aliasArtist(qWords) : {}]);
+    // the artist was found under another name: their own albums (and EPs), oldest first; a romanized title can't match
+    // a Japanese one, so leftover words only narrow the list when something matches them
+    let mine = [], artists = [];
+    if (al.id && al.how !== 'name') {
+      const rgs = await getJson(`https://musicbrainz.org/ws/2/release-group?fmt=json&limit=100&artist=${al.id}&type=album|ep`, { 'user-agent': UA }, 86400);
+      mine = arr(rgs && rgs['release-groups']).map(rg => ({ ...fromMbRg(rg, al.name, al.id), aka: al.aka })).filter(x => x.title)
+        .sort((x, y) => (x.kind === 'album' ? 0 : 1) - (y.kind === 'album' ? 0 : 1) || (x.year || '9999').localeCompare(y.year || '9999'));
+      if (al.left.length) { const hit = mine.filter(x => al.left.every(w => words(x.title).some(t => t.startsWith(w)))); if (hit.length) mine = hit; }
+      artists = [{ name: al.name, aka: al.aka, arid: al.id }];
+    }
+    let s = s0;
+    if (!mine.length && (!ws.length || (s && !arr(s['release-groups']).length))) s = await ask(loose);
+    const items = [...mine.slice(0, 30), ...arr(s && s['release-groups']).filter(rg => (rg.score || 0) >= 30).map(rg => fromMbRg(rg)).filter(x => x.title && x.artist)];
+    return { items, artists, partial: !s && !mine.length };
   });
 }
 
@@ -522,6 +585,7 @@ ${lines}
 - 추천한 작품은 서버가 Apple Music·Deezer 카탈로그에서 하나하나 찾아본다. 찾지 못한 작품은 지어낸 것으로 보고 버린다.
 - 그러니 제목이 정확히 떠오르지 않는 작품, 존재 여부가 애매한 작품은 절대 쓰지 마라. 숨은 작품을 추천할 때도 실제로 발매된 것을 확실히 아는 것만 써라.
 - 아티스트의 다른 앨범 제목, 수록곡 제목, 다른 아티스트의 앨범 제목을 섞어 새 제목을 만들지 마라.
+- 일본·한국·중화권처럼 라틴 문자를 쓰지 않는 나라의 작품은 아티스트와 제목을 그 나라 Apple Music과 MusicBrainz에 실린 원어 표기 그대로 써라(예: 椎名林檎 「無罪モラトリアム」, 山下達郎 「FOR YOU」, 大貫妙子 「SUNSHOWER」, 들국화 「들국화」). 로마자로 옮기거나 번역하지 마라. 원래 영문으로 활동하는 이름(Fishmans, Lamp, KIRINJI)과 원래 영문인 제목은 그대로 둔다. country도 정확히 써라(일본 작품이면 일본).
 - 실제 밴드와 이름이 비슷한 가상의 밴드를 만들지 마라(예: The Depreciation Guild는 실존하지만 The Depreciation Society는 없다). 슈게이징·드림팝·인디처럼 작은 장르일수록 이 실수가 잦으니, 그 장르에서 디스코그래피를 정확히 아는 아티스트만 써라.
 - 곡 하나만 확실하고 그 곡의 앨범이 불확실하면 앨범으로 추천하지 말고 곡으로 추천하라. 둘 다 불확실하면 다른 작품을 골라라.
 ① 실제로 존재하는 작품인가 ② 아티스트와 제목 철자가 원어 표기 그대로인가 ③ 연도가 재발매·리마스터가 아닌 최초 발매 연도인가 ④ 곡이 그 앨범에 실제로 수록됐는가 ⑤ 연결 근거로 든 사람·레이블이 실제로 참여했는가. 하나라도 확신이 없으면 그 작품은 빼라.
@@ -673,6 +737,8 @@ function recLine(line) {
 // check one recommendation against Apple's catalogue (MusicBrainz as a fallback) and return what changed
 // check one recommendation against the catalogues and return what changed.
 // missing: at least two catalogues answered and none of them knows this work → it's dropped (spares and a top-up replace it)
+// the Apple storefront a record is filed in: Japanese records in Japan's (under their own script), Korean in Korea's
+const storeFor = r => { const s = `${r.artist} ${r.title}`, c = String(r.country || ''); return /[가-힣]/.test(s) || /한국/.test(c) ? 'KR' : /[぀-ヿ㐀-鿿]/.test(s) || /일본/.test(c) ? 'JP' : 'US'; };
 async function appleAlbum(artist, title, c) {
   const list = await itunesRaw({ term: `${artist} ${title}`, entity: 'album', limit: '10' }, c);
   const hit = arr(list).find(x => sameArtist(x.artistName, artist) && sameTitle(x.collectionName, title));
@@ -687,13 +753,13 @@ async function verifyOne(r, budget) {
   // the server can't use Apple (refused): MusicBrainz decides here; anything it can't answer is left to the browser
   const viaMb = async () => {
     const m = await budget.mb(() => mbExists(r.type === 'track' ? 'track' : 'album', r.artist, r.title));
-    if (m.mb === false) return { patch, fixed, missing: true };
+    if (m.mb === false) return { patch, fixed };   // MusicBrainz alone does not condemn it (it is thin on Korean / Japanese records): the browser asks Apple too
     if (m.mb === true) { patch.verified = true; patch.recheck = true; if (m.cover) patch.cover = m.cover; }   // MusicBrainz knows it; the browser still checks Apple (details) or the cover (proof)
     return { patch, fixed };
   };
   if (now() < appleDownUntil) return viaMb();
   if (r.type === 'track') {
-    const s = await findSong(r.artist, r.title);
+    const s = await findSong(r.artist, r.title, storeFor(r));
     if (!s.answered) return viaMb();
     if (s.albums.length) {
       patch.verified = true;
@@ -708,9 +774,10 @@ async function verifyOne(r, budget) {
     }
     return { patch, fixed };
   }
-  let al = await appleAlbum(r.artist, r.title, 'US');
+  const first = storeFor(r), second = first === 'US' ? 'KR' : 'US';
+  let al = await appleAlbum(r.artist, r.title, first);
   if (!al.answered) return viaMb();
-  if (!al.id && take(1)) { const kr = await appleAlbum(r.artist, r.title, 'KR'); if (kr.id) al = kr; }
+  if (!al.id && take(1)) { const kr = await appleAlbum(r.artist, r.title, second); if (kr.id) al = kr; }
   if (!al.id) {
     if (!take(1)) return { patch, fixed };
     const m = await mbExists('album', r.artist, r.title);
@@ -816,7 +883,7 @@ async function health(env, req) {
   }
   const k = env.GEMINI_API_KEY || '';
   return json({
-    version: 2, build: '2026.11.01-0930', db, gemini_key: !!k,
+    version: 2, build: '2026.11.03-1240', db, gemini_key: !!k,
     gemini_key_format: k ? (k.trim() !== k ? 'has_spaces' : /^AQ\./.test(k) ? 'AQ' : /^AIza/.test(k) ? 'AIza' : 'unknown') : null,
     pin_pepper: !!env.PIN_PEPPER, admins: admins(env).length, models: modelList(env),
     deezer_here: new URL(req.url).searchParams.get('up') === '1' ? await deezerOpen() : undefined,
